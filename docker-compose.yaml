@@ -1,0 +1,166 @@
+services:
+  galera1:
+    image: ${MARIADB_IMAGE:-mariadb:11.5}
+    container_name: ${COMPOSE_PROJECT_NAME:-galera}_galera1
+    hostname: galera1
+    restart: unless-stopped
+    environment:
+      MARIADB_ROOT_PASSWORD: ${MARIADB_ROOT_PASSWORD:?set MARIADB_ROOT_PASSWORD in .env}
+      MARIADB_DATABASE: ${MARIADB_DATABASE:?set MARIADB_DATABASE in .env}
+      MARIADB_USER: ${MARIADB_USER:?set MARIADB_USER in .env}
+      MARIADB_PASSWORD: ${MARIADB_PASSWORD:?set MARIADB_PASSWORD in .env}
+    volumes:
+      - galera1_data:/var/lib/mysql
+      - ./config/mariadb/node1/galera.cnf:/etc/mysql/mariadb.conf.d/galera.cnf:ro
+      - ./config/mariadb/init:/docker-entrypoint-initdb.d:ro
+      - ./certs/rootCA.crt:/etc/mysql/ssl/ca.pem:ro
+      - ./certs/galera1.crt:/etc/mysql/ssl/server-cert.pem:ro
+      - ./certs/galera1.key:/etc/mysql/ssl/server-key.pem:ro
+    ports:
+      - "3307:3306"
+    networks:
+      galera_net:
+        aliases:
+          - galera1.local
+    healthcheck:
+      test: ["CMD-SHELL", "mariadb-admin ping -uroot -p\"$${MARIADB_ROOT_PASSWORD}\" --socket=/run/mysqld/mysqld.sock"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  galera2:
+    image: ${MARIADB_IMAGE:-mariadb:11.5}
+    container_name: ${COMPOSE_PROJECT_NAME:-galera}_galera2
+    hostname: galera2
+    restart: unless-stopped
+    environment:
+      MARIADB_ROOT_PASSWORD: ${MARIADB_ROOT_PASSWORD:?set MARIADB_ROOT_PASSWORD in .env}
+      MARIADB_DATABASE: ${MARIADB_DATABASE:?set MARIADB_DATABASE in .env}
+      MARIADB_USER: ${MARIADB_USER:?set MARIADB_USER in .env}
+      MARIADB_PASSWORD: ${MARIADB_PASSWORD:?set MARIADB_PASSWORD in .env}
+    volumes:
+      - galera2_data:/var/lib/mysql
+      - ./config/mariadb/node2/galera.cnf:/etc/mysql/mariadb.conf.d/galera.cnf:ro
+      - ./certs/rootCA.crt:/etc/mysql/ssl/ca.pem:ro
+      - ./certs/galera2.crt:/etc/mysql/ssl/server-cert.pem:ro
+      - ./certs/galera2.key:/etc/mysql/ssl/server-key.pem:ro
+    networks:
+      galera_net:
+        aliases:
+          - galera2.local
+    depends_on:
+      - galera1
+    healthcheck:
+      test: ["CMD-SHELL", "mariadb-admin ping -uroot -p\"$${MARIADB_ROOT_PASSWORD}\" --socket=/run/mysqld/mysqld.sock"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  galera3:
+    image: ${MARIADB_IMAGE:-mariadb:11.5}
+    container_name: ${COMPOSE_PROJECT_NAME:-galera}_galera3
+    hostname: galera3
+    restart: unless-stopped
+    environment:
+      MARIADB_ROOT_PASSWORD: ${MARIADB_ROOT_PASSWORD:?set MARIADB_ROOT_PASSWORD in .env}
+      MARIADB_DATABASE: ${MARIADB_DATABASE:?set MARIADB_DATABASE in .env}
+      MARIADB_USER: ${MARIADB_USER:?set MARIADB_USER in .env}
+      MARIADB_PASSWORD: ${MARIADB_PASSWORD:?set MARIADB_PASSWORD in .env}
+    volumes:
+      - galera3_data:/var/lib/mysql
+      - ./config/mariadb/node3/galera.cnf:/etc/mysql/mariadb.conf.d/galera.cnf:ro
+      - ./certs/rootCA.crt:/etc/mysql/ssl/ca.pem:ro
+      - ./certs/galera3.crt:/etc/mysql/ssl/server-cert.pem:ro
+      - ./certs/galera3.key:/etc/mysql/ssl/server-key.pem:ro
+    networks:
+      galera_net:
+        aliases:
+          - galera3.local
+    depends_on:
+      - galera1
+    healthcheck:
+      test: ["CMD-SHELL", "mariadb-admin ping -uroot -p\"$${MARIADB_ROOT_PASSWORD}\" --socket=/run/mysqld/mysqld.sock"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  valkey:
+    image: ${VALKEY_IMAGE:-valkey/valkey:8.1.4-alpine}
+    container_name: ${COMPOSE_PROJECT_NAME:-galera}_valkey
+    restart: unless-stopped
+    command: valkey-server --appendonly yes
+    volumes:
+      - valkey_data:/data
+    ports:
+      - "6379:6379"
+    networks:
+      galera_net:
+
+  passbolt:
+    image: ${PASSBOLT_IMAGE:-passbolt/passbolt:latest-ce}
+    container_name: ${COMPOSE_PROJECT_NAME:-galera}_passbolt
+    restart: unless-stopped
+    depends_on:
+      galera1:
+        condition: service_healthy
+      valkey:
+        condition: service_started
+    environment:
+      APP_FULL_BASE_URL: ${PASSBOLT_BASE_URL:?set PASSBOLT_BASE_URL in .env}
+      DATASOURCES_DEFAULT_HOST: ${DATASOURCES_DEFAULT_HOST:?set DATASOURCES_DEFAULT_HOST in .env}
+      DATASOURCES_DEFAULT_PORT: 3306
+      DATASOURCES_DEFAULT_USERNAME: ${DATASOURCES_DEFAULT_USERNAME:?set DATASOURCES_DEFAULT_USERNAME in .env}
+      DATASOURCES_DEFAULT_PASSWORD: ${DATASOURCES_DEFAULT_PASSWORD:?set DATASOURCES_DEFAULT_PASSWORD in .env}
+      DATASOURCES_DEFAULT_DATABASE: ${DATASOURCES_DEFAULT_DATABASE:?set DATASOURCES_DEFAULT_DATABASE in .env}
+      DATASOURCES_DEFAULT_SSL_CA: /etc/passbolt/db-ca.crt
+      DATASOURCES_DEFAULT_SSL_CERT: /etc/passbolt/db-client.crt
+      DATASOURCES_DEFAULT_SSL_KEY: /etc/passbolt/db-client.key
+      PASSBOLT_SSL_FORCE: "true"
+      CACHE_CAKECORE_CLASSNAME: 'Cake\Cache\Engine\RedisEngine'
+      CACHE_CAKECORE_HOST: valkey
+      CACHE_CAKECORE_PORT: 6379
+      CACHE_CAKECORE_PASSWORD: ""
+      CACHE_CAKECORE_DATABASE: 0
+      SESSION_DEFAULTS: cache
+    volumes:
+      - passbolt_gpg:/etc/passbolt/gpg
+      - passbolt_jwt:/etc/passbolt/jwt
+      - ./certs/rootCA.crt:/etc/passbolt/db-ca.crt:ro
+      - ./certs/passbolt-db-client.crt:/etc/passbolt/db-client.crt:ro
+      - ./certs/passbolt-db-client.key:/etc/passbolt/db-client.key:ro
+    ports:
+      - "443:443"
+    command:
+      - /bin/bash
+      - -ceu
+      - |
+        /docker-entrypoint.sh
+    networks:
+      galera_net:
+        aliases:
+          - passbolt.local
+    healthcheck:
+      test:
+        - CMD
+        - /bin/bash
+        - -lc
+        - |
+          source /etc/environment >/dev/null 2>&1 || true
+          /usr/bin/wait-for.sh -t 0 127.0.0.1:443 -- curl -sk https://127.0.0.1/healthcheck/status.json
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 60s
+
+networks:
+  galera_net:
+    driver: bridge
+
+volumes:
+  galera1_data:
+  galera2_data:
+  galera3_data:
+  valkey_data:
+  passbolt_gpg:
+  passbolt_jwt:
+

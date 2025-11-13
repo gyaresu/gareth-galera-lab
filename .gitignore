@@ -1,0 +1,43 @@
+subscription_key.txt
+.DS_Store
+data
+gpg_volume
+jwt_volume
+error_logs
+
+# Generated realm files
+*.realm.json
+master-realm.json
+passbolt-realm.json
+
+# Generated certificates
+keys/*.crt
+keys/*.key
+keys/*.csr
+keys/*.srl
+keys/*.pem
+ldap-certs/*.crt
+ldap-certs/*.key
+ldap-certs/*.csr
+ldap-certs/*.pem
+
+# Downloaded LDAP certificates (regenerated on each setup)
+certs/ldap-local.crt
+certs/ldaps_bundle.crt
+
+# Keep directories but not their contents
+!keys/.gitkeep
+!keys/gpg/.gitkeep
+!ldap-certs/.gitkeep
+!config/db/.gitkeep
+!config/php/.gitkeep
+!config/ssl/.gitkeep
+
+# Ignore generated material inside keys/ and ldap-certs/
+keys/*
+!keys/.gitkeep
+!keys/gpg/
+keys/gpg/*
+!keys/gpg/.gitkeep
+ldap-certs/*
+!ldap-certs/.gitkeep

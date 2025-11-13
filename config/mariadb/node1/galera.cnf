@@ -1,0 +1,34 @@
+# Node 1 Galera configuration.
+# Reference: https://mariadb.com/docs/galera-cluster/readme/mariadb-galera-cluster-usage-guide
+[mysqld]
+binlog_format=ROW
+default_storage_engine=InnoDB
+innodb_autoinc_lock_mode=2
+bind-address=0.0.0.0
+server-id=1
+log-error=/var/lib/mysql/galera1.err
+
+wsrep_on=ON
+wsrep_provider=/usr/lib/galera/libgalera_smm.so
+# Bootstrap node advertises empty address list so it can form the Primary Component.
+wsrep_cluster_name=passbolt_galera
+wsrep_cluster_address=gcomm://
+wsrep_node_name=galera1
+# When deploying outside Docker, set this to the node’s routable IP or FQDN.
+# In the blog lab we resolve galera1.local via /etc/hosts to 127.0.0.1.
+wsrep_node_address=galera1.local:4567
+# rsync SST keeps the donor simple for a small lab dataset.
+wsrep_sst_method=rsync
+wsrep_sst_receive_address=galera1:4444
+wsrep_provider_options="socket.ssl_cert=/etc/mysql/ssl/server-cert.pem;socket.ssl_key=/etc/mysql/ssl/server-key.pem;socket.ssl_ca=/etc/mysql/ssl/ca.pem"
+
+# Force TLS for client connections (Passbolt) and replication.
+ssl-ca=/etc/mysql/ssl/ca.pem
+ssl-cert=/etc/mysql/ssl/server-cert.pem
+ssl-key=/etc/mysql/ssl/server-key.pem
+require_secure_transport=ON
+
+skip-name-resolve=ON
+character-set-server=utf8mb4
+collation-server=utf8mb4_unicode_ci
+
