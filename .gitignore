@@ -4,6 +4,8 @@ data
 gpg_volume
 jwt_volume
 error_logs
+# Local environment overrides
+.env
 
 # Generated realm files
 *.realm.json
@@ -24,6 +26,12 @@ ldap-certs/*.pem
 # Downloaded LDAP certificates (regenerated on each setup)
 certs/ldap-local.crt
 certs/ldaps_bundle.crt
+
+# Generated Galera/Passbolt certificates
+certs/*.crt
+certs/*.key
+certs/*.pem
+certs/*.srl
 
 # Keep directories but not their contents
 !keys/.gitkeep
