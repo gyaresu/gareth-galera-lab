@@ -648,7 +648,7 @@ Drop these commands into your shell while the lab is running; they work against 
   - `wsrep_cluster_size`: Number of nodes in the current component. Should match your expected total (3 in this lab). If it's less than expected, some nodes may have lost connectivity.
   - `wsrep_cluster_state_uuid` and `wsrep_cluster_conf_id`: Must be identical across all nodes. If they differ, nodes are in different components (split-brain scenario). For a healthy cluster, these values must be the same on every node.
 
-- **Flow-control pressure (fraction of time paused; 0.0 is healthy, 0.2+ indicates issues)**
+- **Flow-control pressure (fraction of time paused; values near 0 are healthy, 0.2+ indicates issues)**
 
   ```bash
   docker compose exec -e MYSQL_PWD="$MARIADB_ROOT_PASSWORD" galera1 mariadb \
@@ -658,10 +658,12 @@ Drop these commands into your shell while the lab is running; they work against 
 
   ```text
   Variable_name     Value
-  wsrep_flow_control_paused  0
+  wsrep_flow_control_paused  7.16267e-07
   ```
 
-- **Receive queue size (high or increasing values indicate a slow node)**
+  **Understanding the value:** This metric is a fraction between 0.0 and 1.0 representing the proportion of time replication has been paused since the last `FLUSH STATUS`. A value of `7.16267e-07` (which is 0.000000716267) means replication was paused for about 0.00007% of the time - this is extremely small and perfectly healthy. Values very close to zero (like `0`, `1e-06`, or `7e-07`) all indicate minimal flow control pauses. Values around `0.2` (20% of time paused) or higher indicate performance issues that need investigation. The value resets after each `FLUSH STATUS` command.
+
+- **Receive queue size (average number of write-sets waiting to be applied; small values are normal, high/rising values indicate issues)**
 
   ```bash
   docker compose exec -e MYSQL_PWD="$MARIADB_ROOT_PASSWORD" galera1 mariadb \
@@ -674,7 +676,7 @@ Drop these commands into your shell while the lab is running; they work against 
   wsrep_local_recv_queue_avg  0.5
   ```
 
-  A high or increasing value suggests a node struggling to keep up, likely triggering flow control. This is especially important to monitor in WAN deployments where network latency can cause queues to grow.
+  **Understanding the value:** This metric shows the average number of write-sets that have been received from other nodes but haven't yet been applied to this node's database since the last `FLUSH STATUS` command (or since server start if never flushed). Small values (like `0.08`, `0.1`, or `0.5`) are common and normal, especially during cluster startup, initial state transfers, or brief load spikes. The real concern is when values are consistently high (approaching the flow control threshold of `gcs.fc_limit`, default 100 write-sets) or steadily increasing over time, which indicates the node cannot keep up and may trigger flow control. Flow control pauses replication across the entire cluster until the slow node catches up. This is especially important to monitor in WAN deployments where network latency can cause queues to grow. If you see persistently high or increasing values, consider increasing `wsrep_slave_threads` (the number of threads applying write-sets in parallel), but don't set it higher than your number of CPU cores. The value resets after each `FLUSH STATUS` command.
 
 - **Current cluster members and their advertised addresses**
 
@@ -737,7 +739,8 @@ All of the `mariadb` invocations accept `--defaults-file=/etc/mysql/conf.d/docke
 - **SST (State Snapshot Transfer)** - a full copy of the database streamed to a joining node; wipes and replaces the recipient's datadir.
 - **IST (Incremental State Transfer)** - a differential catch-up that replays recent transactions from the donor's Galera cache (GCache). Used when the recipient was offline briefly.
 - **Donor / Recipient** - during SST/IST the donor streams data to the recipient (joining) node; Galera logs call out these roles explicitly.
-- **Flow control / `wsrep_flow_control_paused`** - When a slow node's receive queue exceeds `gcs.fc_limit` (default 100 write-sets), it broadcasts a PAUSE message. All nodes temporarily stop replicating new transactions until the slow node catches up. This metric shows the fraction of time paused since the last `FLUSH STATUS` (0.0 is healthy; 0.2 or higher indicates issues).[^11]
+- **Flow control / `wsrep_flow_control_paused`** - When a slow node's receive queue exceeds `gcs.fc_limit` (default 100 write-sets), it broadcasts a PAUSE message. All nodes temporarily stop replicating new transactions until the slow node catches up. This metric shows the fraction of time paused since the last `FLUSH STATUS` as a value between 0.0 and 1.0. Values very close to zero (like `0`, `1e-06`, or `7e-07`) are healthy and indicate minimal flow control pauses. Values around `0.2` (20% of time paused) or higher indicate performance issues that need investigation. The value resets after each `FLUSH STATUS` command.[^11]
+- **`wsrep_local_recv_queue_avg`** - The average number of write-sets that have been received from other nodes but haven't yet been applied to this node's database since the last `FLUSH STATUS` command (or since server start if never flushed). Small values (like `0.08`, `0.1`, or `0.5`) are common and normal, especially during startup or load spikes. The real concern is when values are consistently high (approaching `gcs.fc_limit`, default 100 write-sets) or steadily increasing over time, which can trigger flow control. If persistently high, consider increasing `wsrep_slave_threads` (but not higher than CPU core count). The value resets after each `FLUSH STATUS` command.
 - **`wsrep_local_state_comment`** - human-readable node state (`Joining`, `Donor`, `Synced`, etc.).
 - **`wsrep_OSU_method` (TOI vs RSU)** - Controls how schema changes (DDL - Data Definition Language statements like `CREATE TABLE`, `ALTER TABLE`, `DROP INDEX`) are applied. Total Order Isolation (TOI) applies DDL cluster-wide simultaneously on all nodes, ensuring schema consistency but blocking the entire cluster during the change. Rolling Schema Upgrade (RSU) temporarily isolates a single node for the change, allowing other nodes to continue serving traffic, but requires careful coordination to avoid schema conflicts.
 - **GCache** - Galera's cache of recent write-sets, used to serve IST. If a recipient's gap exceeds the cache, Galera falls back to SST.
