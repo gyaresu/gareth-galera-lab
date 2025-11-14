@@ -119,33 +119,32 @@ docker compose exec galera1 mariadb \
 # Expect Value = 3
 ```
 
-### Health Checks Over Unix Sockets
+### Verify Replication Works
 
-The stock Compose file ships with `mysqladmin` health checks, but the MariaDB 11.8 image only exposes `mariadb-admin`. Additionally, TLS hostname verification fails because the container's hostname is not `galera1.local`. Updating the health check to use the Unix socket keeps the dependency graph happy and the checks stay inside the container instead of making TLS connections.
-
-```yaml
-healthcheck:
-  test: ["CMD-SHELL", "mariadb-admin ping -uroot -p\"$${MARIADB_ROOT_PASSWORD}\" --socket=/run/mysqld/mysqld.sock"]
-```
-
-After tweaking the YAML, recreate the services (`docker compose up -d galera1 galera2 galera3`) to see them transition to `healthy`.
-
-### Replication & TLS Validation
-
-Write a row through node 1 and read it back via node 2 (a quick proof that writes replicate and commits are visible cluster-wide):
+Test that writes to one node are immediately visible on all other nodes. This demonstrates Galera's synchronous replication - unlike asynchronous replication (where there's a delay), changes are committed on all nodes simultaneously:
 
 ```bash
+# Write data to node 1
 docker compose exec galera1 mariadb \
   -u"$DATASOURCES_DEFAULT_USERNAME" -p"$DATASOURCES_DEFAULT_PASSWORD" "$DATASOURCES_DEFAULT_DATABASE" \
   -e "CREATE TABLE galera_probe (id INT PRIMARY KEY AUTO_INCREMENT, note VARCHAR(255)); \
       INSERT INTO galera_probe (note) VALUES ('bootstrapped via galera1');"
 
+# Read the same data from node 2 (proving it replicated)
 docker compose exec galera2 mariadb \
   -u"$DATASOURCES_DEFAULT_USERNAME" -p"$DATASOURCES_DEFAULT_PASSWORD" "$DATASOURCES_DEFAULT_DATABASE" \
   -e "SELECT * FROM galera_probe;"
 ```
 
-Check that connections negotiate TLS (MariaDB exposes the negotiated cipher via `SHOW STATUS LIKE 'Ssl_cipher';`):
+You should see the row you inserted on `galera1` immediately available on `galera2`. This confirms that:
+
+- Writes are replicating synchronously across all nodes
+- The cluster is functioning correctly
+- All nodes have the same data
+
+### Verify TLS Encryption
+
+Check that client connections are encrypted. MariaDB tracks the TLS cipher suite used for each connection in the `Ssl_cipher` status variable. A non-empty value confirms TLS is active:
 
 ```bash
 docker compose exec galera1 mariadb \
@@ -153,14 +152,25 @@ docker compose exec galera1 mariadb \
   -e "SHOW STATUS LIKE 'Ssl_cipher';"
 ```
 
-You should see `TLS_AES_256_GCM_SHA384`.
+You should see `Ssl_cipher` with value `TLS_AES_256_GCM_SHA384` (or another TLS cipher suite). This confirms:
 
-### TLS Everywhere
+- The connection is encrypted using TLS
+- The client certificate authentication worked
+- Data in transit is protected
 
-- **Galera replication** uses the certificates mounted into each node (`server-cert.pem`, `server-key.pem`, `ca.pem`) via `wsrep_provider_options`, so node-to-node state transfers run over TLS.
-- **passbolt client traffic** is forced over TLS by `config/mariadb/init/02-enforce-ssl.sql`, and the environment variables point passbolt at `/etc/passbolt/db-*.{crt,key}`. The cipher check above confirms the connection negotiates TLS successfully.  
-- **Account policy** mirrors MariaDB's recommendation to require TLS on sensitive users: `ALTER USER 'passbolt'@'%' REQUIRE SSL;` ensures credentials are never sent in cleartext, aligning with the server's TLS-intention guidance.[^3]  
-- **Server capability** can be confirmed with `SHOW GLOBAL VARIABLES LIKE 'have_ssl';`. A `YES` value indicates the engine loaded TLS support, matching the secure-connections checklist from MariaDB.[^4]
+If you see an empty value or `NULL`, TLS is not active and you should check your certificate configuration.
+
+### TLS Everywhere - Summary
+
+This lab enforces TLS encryption for all database traffic:
+
+- **Galera replication (node-to-node)**: Each node uses certificates (`server-cert.pem`, `server-key.pem`, `ca.pem`) configured via `wsrep_provider_options` in `galera.cnf`. This ensures state transfers (SST/IST) and replication traffic between nodes is encrypted and authenticated.
+
+- **Client connections (application-to-database)**: Passbolt connects to MariaDB using client certificates (`db-client.crt`, `db-client.key`) and the server requires TLS via `ALTER USER 'passbolt'@'%' REQUIRE SSL;` in `config/mariadb/init/02-enforce-ssl.sql`. This is mutual TLS (mTLS) - both sides authenticate each other.[^3]
+
+- **Server TLS capability**: You can verify MariaDB has TLS support loaded with `SHOW GLOBAL VARIABLES LIKE 'have_ssl';`. A value of `YES` confirms TLS is available; `NO` or `DISABLED` means TLS is not active.[^4]
+
+The cipher check above (`Ssl_cipher`) confirms that client connections are successfully negotiating TLS. Without TLS, all database traffic (including passwords and sensitive data) would be sent in cleartext.
 
 ---
 
