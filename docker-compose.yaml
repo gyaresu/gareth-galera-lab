@@ -1,6 +1,6 @@
 services:
   galera1:
-    image: ${MARIADB_IMAGE:-mariadb:11.5}
+    image: ${MARIADB_IMAGE:-mariadb:11.8}
     container_name: ${COMPOSE_PROJECT_NAME:-galera}_galera1
     hostname: galera1
     restart: unless-stopped
@@ -13,6 +13,9 @@ services:
       - galera1_data:/var/lib/mysql
       - ./config/mariadb/node1/galera.cnf:/etc/mysql/mariadb.conf.d/galera.cnf:ro
       - ./config/mariadb/init:/docker-entrypoint-initdb.d:ro
+      # mTLS certificates for Galera replication and client connections
+      # - rootCA.crt: CA certificate used to verify peer certificates (both replication and clients)
+      # - galera1.crt/key: This node's server certificate for replication mTLS and client TLS
       - ./certs/rootCA.crt:/etc/mysql/ssl/ca.pem:ro
       - ./certs/galera1.crt:/etc/mysql/ssl/server-cert.pem:ro
       - ./certs/galera1.key:/etc/mysql/ssl/server-key.pem:ro
@@ -29,7 +32,7 @@ services:
       retries: 5
 
   galera2:
-    image: ${MARIADB_IMAGE:-mariadb:11.5}
+    image: ${MARIADB_IMAGE:-mariadb:11.8}
     container_name: ${COMPOSE_PROJECT_NAME:-galera}_galera2
     hostname: galera2
     restart: unless-stopped
@@ -41,6 +44,9 @@ services:
     volumes:
       - galera2_data:/var/lib/mysql
       - ./config/mariadb/node2/galera.cnf:/etc/mysql/mariadb.conf.d/galera.cnf:ro
+      # mTLS certificates for Galera replication and client connections
+      # - rootCA.crt: CA certificate used to verify peer certificates (both replication and clients)
+      # - galera2.crt/key: This node's server certificate for replication mTLS and client TLS
       - ./certs/rootCA.crt:/etc/mysql/ssl/ca.pem:ro
       - ./certs/galera2.crt:/etc/mysql/ssl/server-cert.pem:ro
       - ./certs/galera2.key:/etc/mysql/ssl/server-key.pem:ro
@@ -57,7 +63,7 @@ services:
       retries: 5
 
   galera3:
-    image: ${MARIADB_IMAGE:-mariadb:11.5}
+    image: ${MARIADB_IMAGE:-mariadb:11.8}
     container_name: ${COMPOSE_PROJECT_NAME:-galera}_galera3
     hostname: galera3
     restart: unless-stopped
@@ -69,6 +75,9 @@ services:
     volumes:
       - galera3_data:/var/lib/mysql
       - ./config/mariadb/node3/galera.cnf:/etc/mysql/mariadb.conf.d/galera.cnf:ro
+      # mTLS certificates for Galera replication and client connections
+      # - rootCA.crt: CA certificate used to verify peer certificates (both replication and clients)
+      # - galera3.crt/key: This node's server certificate for replication mTLS and client TLS
       - ./certs/rootCA.crt:/etc/mysql/ssl/ca.pem:ro
       - ./certs/galera3.crt:/etc/mysql/ssl/server-cert.pem:ro
       - ./certs/galera3.key:/etc/mysql/ssl/server-key.pem:ro
@@ -97,7 +106,7 @@ services:
       galera_net:
 
   passbolt:
-    image: ${PASSBOLT_IMAGE:-passbolt/passbolt:latest-ce}
+    image: ${PASSBOLT_IMAGE:-passbolt/passbolt:5.7.0-1-ce}
     container_name: ${COMPOSE_PROJECT_NAME:-galera}_passbolt
     restart: unless-stopped
     depends_on:
@@ -112,6 +121,8 @@ services:
       DATASOURCES_DEFAULT_USERNAME: ${DATASOURCES_DEFAULT_USERNAME:?set DATASOURCES_DEFAULT_USERNAME in .env}
       DATASOURCES_DEFAULT_PASSWORD: ${DATASOURCES_DEFAULT_PASSWORD:?set DATASOURCES_DEFAULT_PASSWORD in .env}
       DATASOURCES_DEFAULT_DATABASE: ${DATASOURCES_DEFAULT_DATABASE:?set DATASOURCES_DEFAULT_DATABASE in .env}
+      # mTLS client certificates for Passbolt to authenticate to Galera
+      # Passbolt presents these certificates when connecting to the database
       DATASOURCES_DEFAULT_SSL_CA: /etc/passbolt/db-ca.crt
       DATASOURCES_DEFAULT_SSL_CERT: /etc/passbolt/db-client.crt
       DATASOURCES_DEFAULT_SSL_KEY: /etc/passbolt/db-client.key
@@ -125,6 +136,9 @@ services:
     volumes:
       - passbolt_gpg:/etc/passbolt/gpg
       - passbolt_jwt:/etc/passbolt/jwt
+      # mTLS client certificates mounted into Passbolt container
+      # - db-ca.crt: CA certificate to verify Galera server certificates
+      # - db-client.crt/key: Passbolt's client certificate for mTLS authentication to Galera
       - ./certs/rootCA.crt:/etc/passbolt/db-ca.crt:ro
       - ./certs/passbolt-db-client.crt:/etc/passbolt/db-client.crt:ro
       - ./certs/passbolt-db-client.key:/etc/passbolt/db-client.key:ro

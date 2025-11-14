@@ -1,6 +1,8 @@
 # Node 2 joins the cluster started by galera1.
 # Reference: https://mariadb.com/docs/galera-cluster/readme/mariadb-galera-cluster-usage-guide
 [mysqld]
+
+# Standard MariaDB settings required for Galera
 binlog_format=ROW
 default_storage_engine=InnoDB
 innodb_autoinc_lock_mode=2
@@ -8,23 +10,39 @@ bind-address=0.0.0.0
 server-id=2
 log-error=/var/lib/mysql/galera2.err
 
+# Galera replication settings
 wsrep_on=ON
 wsrep_provider=/usr/lib/galera/libgalera_smm.so
 wsrep_cluster_name=passbolt_galera
+
+# List all cluster members so this node can join the existing cluster.
+# In production, use FQDNs: gcomm://galera1.example.com,galera2.example.com,galera3.example.com
 wsrep_cluster_address=gcomm://galera1,galera2,galera3
 wsrep_node_name=galera2
-# When deploying outside Docker, set this to the node’s routable IP or FQDN.
-# In the blog lab we resolve galera2.local via /etc/hosts to 127.0.0.1.
+
+# Node's advertised address for replication traffic (port 4567 is Galera's default).
+# When deploying outside Docker, set this to the node's routable IP or FQDN.
+# In this lab we resolve galera2.local via /etc/hosts to 127.0.0.1.
 wsrep_node_address=galera2.local:4567
-# rsync SST is adequate for this small lab dataset.
+
+# State Snapshot Transfer method (rsync is simple but slow; mariabackup is faster for production).
 wsrep_sst_method=rsync
 wsrep_sst_receive_address=galera2:4444
+
+# Mutual TLS (mTLS) for Galera replication traffic.
+# These certificates enable node-to-node authentication and encryption.
+# Each node presents its server certificate and verifies peers using the CA.
+# This is mTLS because both sides authenticate each other, not just the client checking the server.
 wsrep_provider_options="socket.ssl_cert=/etc/mysql/ssl/server-cert.pem;socket.ssl_key=/etc/mysql/ssl/server-key.pem;socket.ssl_ca=/etc/mysql/ssl/ca.pem"
 
-# Force TLS for client connections (Passbolt) and replication.
+# TLS for client connections (Passbolt application).
+# These are the server-side certificates that clients verify.
 ssl-ca=/etc/mysql/ssl/ca.pem
 ssl-cert=/etc/mysql/ssl/server-cert.pem
 ssl-key=/etc/mysql/ssl/server-key.pem
+
+# Require TLS for all client connections. Passbolt must present a client certificate (mTLS).
+# The client certificate requirement is enforced via ALTER USER in 02-enforce-ssl.sql.
 require_secure_transport=ON
 
 skip-name-resolve=ON
