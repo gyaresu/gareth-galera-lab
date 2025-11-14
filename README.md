@@ -1,6 +1,6 @@
 # Passbolt, TLS, and MariaDB Galera Cluster: A love story
 
-Running passbolt against a three-node MariaDB Galera cluster is an easy way to explore high availability foundations before deploying to production. This lab walkthrough uses the `gareth-galera-lab` repository to spin up a full stack locally, exercise replication, and confirm passbolt operates over mutual TLS.
+Running passbolt against a three-node MariaDB Galera cluster is an easy way to explore high availability foundations before deploying to production. I built this lab walkthrough to spin up a full stack locally, exercise replication, and confirm passbolt operates over mutual TLS.
 
 ---
 
@@ -10,28 +10,102 @@ Running passbolt against a three-node MariaDB Galera cluster is an easy way to e
 - Valkey providing Redis-compatible caching for Passbolt sessions and cache (Valkey is the community-maintained fork of Redis 7, API-compatible with the upstream project; this lab pins `valkey/valkey:8.1.4-alpine`, the 2025-10-21 release)
 - Passbolt Community Edition pointed at the cluster via HTTPS
 
-We will generate certificates, launch the stack with Docker Compose, validate the database topology, and complete the user setup in the browser.
+I'll walk you through generating certificates, launching the stack with Docker Compose, validating the database topology, and completing the user setup in the browser.
+
+---
+
+## Beyond Docker: Deploying to Physical Servers
+
+While this lab uses Docker Compose to spin everything up locally, all the concepts and configurations translate directly to physical servers or VMs. The real value here isn't the container orchestration. It's understanding how to configure Galera clustering, mutual TLS, and certificate management in a production environment.
+
+If you're planning to deploy this to actual infrastructure, here's what stays the same and what changes:
+
+**What translates directly:**
+
+- The Galera configuration files in `config/mariadb/node*/galera.cnf` can be copied to `/etc/mysql/conf.d/` on your servers
+- The certificate generation logic in `scripts/generate-certs.sh` works the same way. Just run it on your certificate authority host
+- The MariaDB initialization SQL scripts apply identically
+- All the monitoring commands and operational procedures work on bare metal
+
+**What you'll need to adapt:**
+
+- **Network configuration**: Replace `.local` hostnames with actual FQDNs (e.g., `galera1.example.com`) and ensure DNS resolution works across your network segments
+- **Certificate distribution**: Instead of mounting volumes, copy certificates to standard locations (`/etc/mysql/ssl/` for server certs, `/etc/passbolt/ssl/` for client certs) with appropriate permissions
+- **Firewall rules**: Open ports 3306 (MariaDB), 4567 (Galera replication), and 4444 (SST) between nodes, plus 443 for Passbolt
+- **Service management**: Use systemd or your init system instead of Docker health checks
+- **Resource allocation**: Ensure adequate RAM for each MariaDB node (Galera keeps the entire dataset in memory during replication), and plan for network bandwidth between data centers if doing WAN clustering
+
+The TLS configuration especially shines on physical servers: when your nodes are in different subnets or data centers, mutual TLS becomes the security layer that makes the distributed topology safe. You can deploy `galera1` in one rack, `galera2` in another, and `galera3` across a WAN link, and as long as they can reach each other's IPs and have valid certificates, the cluster will form and replicate securely.
+
+I've structured the configuration files in this repo to mirror production layouts, so you can literally copy the `.cnf` files and SQL scripts to your servers after updating hostnames and paths. The Docker setup is just a convenient way to test the same configurations locally before rolling them out.
 
 ---
 
 ## Prerequisites
 
-- Docker Compose v2
-- GNU `bash` >= 4 (macOS ships with 3.2; install a newer version, e.g. Homebrew's `/opt/homebrew/bin/bash`)
-- Copy `env.example` to `.env` and customise values (MariaDB root/user passwords, Passbolt datasource, admin account)
+### Required Software
 
-Populate `.env` in the project root (these are the values used by this guide; feel free to change them, but keep the spacing/quoting intact if you do):
+- **Docker Compose v2** - Used to orchestrate the multi-container stack
+- **GNU `bash` >= 4** - Required for the helper scripts. macOS ships with Bash 3.2, so install a newer version (e.g., via Homebrew: `/opt/homebrew/bin/bash`)
+
+### Initial Setup
+
+1. **Create your `.env` file:**
+
+   ```bash
+   cp env.example .env
+   ```
+
+2. **Edit `.env` to customize values:**
+
+   - MariaDB root password (`MARIADB_ROOT_PASSWORD`)
+   - MariaDB user password (`MARIADB_PASSWORD` and `DATASOURCES_DEFAULT_PASSWORD`)
+   - Passbolt admin account details (`PASSBOLT_ADMIN_EMAIL`, `PASSBOLT_ADMIN_FIRSTNAME`, etc.)
+   - Database hostname (`DATASOURCES_DEFAULT_HOST`)
+
+   Keep the spacing and quoting intact when editing - I use these values as-is in the scripts.
+
+3. **Optional: Customize Docker images:**
+
+   If you need different versions, set these in `.env`:
+   - `VALKEY_IMAGE=valkey/valkey:8.1.4-alpine`
+   - `MARIADB_IMAGE=mariadb:11.8`
+
+4. **Configure hostname resolution (if running outside Docker):**
+
+   Add these entries to `/etc/hosts` or your DNS:
+
+   ```text
+   galera1.local
+   galera2.local
+   galera3.local
+   passbolt.local
+   ```
+
+### Quick Start
+
+Once `.env` is configured, you can bring up the entire stack with:
 
 ```bash
-cp env.example .env
-# edit .env to match your environment (passwords, hostnames, admin email, etc.)
+./scripts/start-lab.sh --reset
 ```
 
-Once the file is in place, every helper script loads it automatically. When you change a value, rerun `./scripts/start-lab.sh --reset` so the containers are recreated with the new credentials.
+This script handles:
 
-> Need a different cache or database build? Set `VALKEY_IMAGE` or `MARIADB_IMAGE` in `.env` (e.g. `VALKEY_IMAGE=valkey/valkey:8.1.4-alpine`, `MARIADB_IMAGE=mariadb:11.8`).  
-> Resolved hostnames (`galera1.local`, `galera2.local`, `galera3.local`) should exist in `/etc/hosts` or DNS when you run outside Docker.
-> **Tip:** With `.env` ready, you can bring up the full stack in one go with `./scripts/start-lab.sh --reset`. The script handles certificate generation, Galera bootstrap, Valkey/passbolt startup, and the smoke tests covered below.
+- Certificate generation
+- Galera cluster bootstrap
+- Valkey and Passbolt startup
+- Health checks and smoke tests
+
+**Note:** If you change values in `.env` after the initial setup, rerun `./scripts/start-lab.sh --reset` to recreate containers with the new credentials.
+
+**Running commands manually:** Many of the commands in the walkthrough below use environment variables from your `.env` file (like `$MARIADB_ROOT_PASSWORD`). To use these commands from your computer, source the `.env` file first:
+
+```bash
+source .env
+```
+
+Then the commands will work as shown. If you're running commands from within Docker containers (using `docker compose exec`), the variables are already available via the container environment.
 
 ---
 
@@ -43,7 +117,7 @@ The Galera team itself positions the cluster for situations that demand active-a
 
 Those same scenarios are where TLS-secured replication really matters: when nodes live in different racks, buildings, or subnets, you're relying on the certificates to authenticate peers and encrypt sensitive state transfers instead of trusting the network perimeter.
 
-That's why this demo is a bit of a Trojan horse: it looks like a Galera lab, but the real lesson is how mutual TLS unlocks secure database topologies that aren't confined to a single subnet. By issuing mTLS material for both replication and application clients, you can spread `galera1.example.com`, `galera2.example.com`, and `galera3.example.com` across IPv4 or IPv6 segments without complex firewall rules. Routing only needs to carry the ports; the TLS layer enforces who can talk to whom and keeps the data encrypted in transit.
+That's why this demo is a bit of a Trojan horse: it looks like a Galera lab, but the real lesson I want to share is how mutual TLS unlocks secure database topologies that aren't confined to a single subnet. By issuing mTLS material for both replication and application clients, you can spread `galera1.example.com`, `galera2.example.com`, and `galera3.example.com` across IPv4 or IPv6 segments without complex firewall rules. Routing only needs to carry the ports; the TLS layer enforces who can talk to whom and keeps the data encrypted in transit.
 
 ---
 
@@ -64,7 +138,7 @@ Outputs land under `keys/gpg/`, producing `<email>.key` and `<email>.pub` files.
 
 ## Step 1 - Generate Certificates
 
-The `scripts/generate-certs.sh` helper issues a root CA, server certs for each Galera node, and a mutual TLS client cert for Passbolt. Because the script uses associative arrays, invoke it with the modern bash binary:
+I've included a `scripts/generate-certs.sh` helper that issues a root CA, server certs for each Galera node, and a mutual TLS client cert for Passbolt. Because the script uses associative arrays, you'll need to invoke it with the modern bash binary:
 
 ```bash
 /opt/homebrew/bin/bash ./scripts/generate-certs.sh
@@ -162,7 +236,7 @@ If you see an empty value or `NULL`, TLS is not active and you should check your
 
 ### TLS Everywhere - Summary
 
-This lab enforces TLS encryption for all database traffic:
+I've configured this lab to enforce TLS encryption for all database traffic:
 
 - **Galera replication (node-to-node)**: Each node uses certificates (`server-cert.pem`, `server-key.pem`, `ca.pem`) configured via `wsrep_provider_options` in `galera.cnf`. This ensures state transfers (SST/IST) and replication traffic between nodes is encrypted and authenticated.
 
@@ -177,7 +251,7 @@ The cipher check above (`Ssl_cipher`) confirms that client connections are succe
 ## Step 3 - Start Valkey and Passbolt
 
 > **Why no ProxySQL?**  
-> ProxySQL's Docker image currently ships without a full certificate chain on its frontend listener, which causes strict clients to reject the TLS handshake (see [issue #3788](https://github.com/sysown/proxysql/issues/3788)). Rather than keep a broken proxy in the loop, this demo connects Passbolt directly to the Galera nodes. You can reintroduce HAProxy/ProxySQL later if you need health-aware load balancing.
+> I initially tried to include ProxySQL, but its Docker image currently ships without a full certificate chain on its frontend listener, which causes strict clients to reject the TLS handshake (see [issue #3788](https://github.com/sysown/proxysql/issues/3788)). Rather than keep a broken proxy in the loop, I've connected Passbolt directly to the Galera nodes. You can reintroduce HAProxy/ProxySQL later if you need health-aware load balancing.
 
 With the database tier stable, launch the remaining services:
 
@@ -185,7 +259,7 @@ With the database tier stable, launch the remaining services:
 docker compose up -d valkey passbolt
 ```
 
-Map Passbolt's internal HTTPS listener to the host for convenience (already committed to `docker-compose.yaml`):
+I've mapped Passbolt's internal HTTPS listener to the host for convenience (already committed to `docker-compose.yaml`):
 
 ```yaml
 passbolt:
@@ -231,291 +305,9 @@ Congratulations! You now have a fully operational Passbolt instance running agai
 
 ---
 
-## Playbooks
-
-### Rotate TLS certificates with a controlled pause
-
-Use this drill to rotate the certificates without blowing away the cluster volumes. The cluster is paused briefly while the certificates are replaced; in production you’d point applications at another writer (or stagger node restarts) if you require continuous service.
-
-1. Quiesce the application:
-
-   ```bash
-   docker compose stop passbolt
-   ```
-
-2. Stop the database nodes in reverse order so the primary is last to shut down. This ensures `galera1` records `safe_to_bootstrap=1` in its `grastate.dat` (see [terminology](#galera-terminology-cheat-sheet)).
-
-   ```bash
-   docker compose stop galera3
-   docker compose stop galera2
-   docker compose stop galera1
-   ```
-
-   Optional sanity check:
-
-   ```bash
-   docker compose run --rm galera1 cat /var/lib/mysql/grastate.dat
-   ```
-
-   You should see `safe_to_bootstrap: 1`. If not, identify the node with the highest `seqno` and set its flag to `1` before continuing (details in the [terminology cheat sheet](#galera-terminology-cheat-sheet)).
-
-3. Regenerate the TLS material:
-
-   ```bash
-   /opt/homebrew/bin/bash ./scripts/generate-certs.sh
-   ```
-
-4. Bring the cluster back online:
-
-   ```bash
-   docker compose up -d galera1
-   docker compose up -d galera2
-   docker compose up -d galera3
-   ```
-
-   Wait for `galera1` to report `healthy` (`docker compose ps`) before starting the peers.
-
-5. Restart passbolt and verify the stack:
-
-   ```bash
-   docker compose up -d passbolt
-   ./scripts/check-stack.sh
-   ```
-
-If `check-stack.sh` fails, inspect the relevant logs (`docker compose logs --tail=100 passbolt galera1`) and confirm the regenerated certificates exist under `certs/` with hostnames that match your `.env`.
-
-### Restore a node from scratch
-
-Practice the donor/recipient flow by wiping a node and letting it rejoin via SST (see [terminology](#galera-terminology-cheat-sheet) for a refresher on SST vs IST and donor roles).
-
-```bash
-# Stop the target node (galera2 in this example)
-docker compose stop galera2
-
-# Remove its data directory so SST is required
-docker compose run --rm galera2 bash -c 'rm -rf /var/lib/mysql/*'
-
-# Bring the node back and observe donor selection (watch for "State transfer" in logs)
-docker compose up -d galera2
-
-# Confirm cluster size returns to 3
-docker compose exec galera1 mariadb \
-  -uroot -p"$MARIADB_ROOT_PASSWORD" \
-  -e "SHOW STATUS LIKE 'wsrep_cluster_size';"
-```
-
-Expected result: `wsrep_cluster_size` reports `Value: 3` after SST completes. If it stalls, check `docker compose logs galera2` for credential or certificate errors (and confirm whether the join fell back to SST or IST - see the [terminology cheat sheet](#galera-terminology-cheat-sheet)).
-
-### Backup and restore rehearsal
-
-This flow captures a physical backup from a replica node, prepares it, and restores it onto `galera1`.
-
-```bash
-# Take a hot backup from galera2
-docker compose exec galera2 mariabackup --backup --target-dir=/tmp/backup
-
-# Prepare the backup for restore
-docker compose exec galera2 mariabackup --prepare --target-dir=/tmp/backup
-
-# Stop galera1 and wipe its datadir
-docker compose stop galera1
-docker compose run --rm galera1 bash -c 'rm -rf /var/lib/mysql/*'
-
-# Copy the prepared backup into galera1's datadir
-docker compose exec galera2 bash -c 'tar -C /tmp/backup -cf - .' | \
-  docker compose exec -T galera1 bash -c 'tar -C /var/lib/mysql -xf -'
-
-# Bring galera1 back online and verify cluster health
-docker compose up -d galera1
-./scripts/check-stack.sh
-```
-
-If `check-stack.sh` reports a failure, inspect `docker compose logs galera1` to ensure the restored files have the correct ownership (`mysql:mysql`) and permissions.
-
-### Flip passbolt to another writer
-
-Simulate an application-level failover by pointing passbolt at a different node. This is useful when you need to perform maintenance on the current writer (e.g., restarting `galera1` while it has `wsrep_cluster_address=gcomm://` - see [Restarting the bootstrap node](#restarting-the-bootstrap-node-galera1)).
-
-**Before flipping:** Verify the target node is in Primary Component and can accept writes:
-
-```bash
-# Check that galera2 is in Primary Component
-docker compose exec -e MYSQL_PWD="$MARIADB_ROOT_PASSWORD" galera2 mariadb \
-  -uroot \
-  -e "SHOW STATUS LIKE 'wsrep_cluster_status';"
-```
-
-You should see `wsrep_cluster_status` with value `Primary`. If it shows `Non-Primary`, the node is in non-primary state (read-only) and cannot accept writes - do not flip to it.
-
-**Flip to the new writer:**
-
-```bash
-# Update the target host in .env (set to galera2.local)
-sed -i '' 's/^DATASOURCES_DEFAULT_HOST=.*/DATASOURCES_DEFAULT_HOST=galera2.local/' .env
-
-# Restart the application container so it picks up the change
-docker compose up -d passbolt
-
-# Run the health check to confirm passbolt can reach galera2
-./scripts/check-stack.sh
-```
-
-**Restore the original host** (`galera1.local`) when you're done:
-
-```bash
-sed -i '' 's/^DATASOURCES_DEFAULT_HOST=.*/DATASOURCES_DEFAULT_HOST=galera1.local/' .env
-docker compose up -d passbolt
-./scripts/check-stack.sh
-```
-
-**Why this matters:** In Galera, all nodes in the Primary Component can accept writes, but nodes not in the Primary Component enter a non-primary state (read-only) and halt query processing. Flipping to a non-primary node would cause all database writes to fail. The Primary Component is the majority group of nodes (more than 50%) that can process transactions; nodes outside it are prevented from accepting writes to avoid split-brain scenarios (see the [terminology cheat sheet](#galera-terminology-cheat-sheet) for details).
-
----
-
-### Galera monitoring quick reference
-
-Drop these commands into your shell while the lab is running; they work against the Compose services spun up in this repo. In the examples below we lean on `MYSQL_PWD="$MARIADB_ROOT_PASSWORD"` so you don't have to fight with shell quoting.
-
-- **Cluster summary (quorum, size, state, peer list)**
-
-  Check quorum and Primary Component status. For a healthy cluster, `wsrep_cluster_status` must be `Primary` on all nodes. If it's anything else, the node cannot accept writes:
-
-  ```bash
-  docker compose exec -e MYSQL_PWD="$MARIADB_ROOT_PASSWORD" galera1 mariadb \
-    -uroot \
-    -e "SHOW GLOBAL STATUS WHERE Variable_name IN ('wsrep_cluster_size','wsrep_local_state_comment','wsrep_cluster_status','wsrep_incoming_addresses');"
-  ```
-
-  ```text
-  Variable_name     Value
-  wsrep_local_state_comment  Synced
-  wsrep_incoming_addresses   galera1.local:0,galera2.local:0,galera3.local:0
-  wsrep_cluster_size  3
-  wsrep_cluster_status Primary
-  ```
-
-  **Understanding the values:**
-  - `wsrep_cluster_status=Primary`: Node belongs to the Primary Component and can accept writes. Any other value means the node is in non-primary state (read-only) and cannot process transactions.
-  - `wsrep_cluster_size`: Number of nodes in the current component. Should match your expected total (3 in this lab). If it's less than expected, some nodes may have lost connectivity.
-  - `wsrep_cluster_state_uuid` and `wsrep_cluster_conf_id`: Must be identical across all nodes. If they differ, nodes are in different components (split-brain scenario). For a healthy cluster, these values must be the same on every node.
-
-- **Flow-control pressure (fraction of time paused; 0.0 is healthy, 0.2+ indicates issues)**
-
-  ```bash
-  docker compose exec -e MYSQL_PWD="$MARIADB_ROOT_PASSWORD" galera1 mariadb \
-    -uroot \
-    -e "SHOW STATUS LIKE 'wsrep_flow_control_paused';"
-  ```
-
-  ```text
-  Variable_name     Value
-  wsrep_flow_control_paused  0
-  ```
-
-- **Receive queue size (high or increasing values indicate a slow node)**
-
-  ```bash
-  docker compose exec -e MYSQL_PWD="$MARIADB_ROOT_PASSWORD" galera1 mariadb \
-    -uroot \
-    -e "SHOW STATUS LIKE 'wsrep_local_recv_queue_avg';"
-  ```
-
-  ```text
-  Variable_name     Value
-  wsrep_local_recv_queue_avg  0.5
-  ```
-
-  A high or increasing value suggests a node struggling to keep up, likely triggering flow control. This is especially important to monitor in WAN deployments where network latency can cause queues to grow.
-
-- **Current cluster members and their advertised addresses**
-
-  ```bash
-  docker compose exec -e MYSQL_PWD="$MARIADB_ROOT_PASSWORD" galera1 mariadb \
-    -uroot \
-    -e "SELECT node_name, node_incoming_address FROM mysql.wsrep_cluster_members;"
-  ```
-
-  ```text
-  node_name  node_incoming_address
-  galera1    galera1.local:0
-  galera2    galera2.local:0
-  galera3    galera3.local:0
-  ```
-
-- **Recent Galera log entries (joins, SST progress, authentication issues)**
-
-  ```bash
-  docker compose exec galera1 tail -n 5 /var/lib/mysql/galera1.err
-  ```
-
-  ```text
-  2025-11-13  5:19:00 0 [Note] WSREP: 2.0 (galera3): State transfer from 1.0 (galera2) complete.
-  2025-11-13  5:19:00 0 [Note] WSREP: Member 2.0 (galera3) synced with group.
-  2025-11-13  5:19:00 0 [Note] WSREP: (379a49b9-834c, 'ssl://0.0.0.0:4567') turning message relay requesting off
-  2025-11-13  5:23:51 57 [Warning] Access denied for user 'root'@'localhost' (using password: NO)
-  2025-11-13  5:24:02 60 [Warning] Access denied for user 'root'@'localhost' (using password: NO)
-  ```
-
-- **Container health overview**
-
-  ```bash
-  docker compose ps
-  ```
-
-  ```text
-  NAME              IMAGE                         COMMAND                  STATUS
-  galera_galera1    mariadb:11.8                  "docker-entrypoint…"     Up 6 minutes (healthy)
-  galera_galera2    mariadb:11.8                  "docker-entrypoint…"     Up 6 minutes (healthy)
-  galera_galera3    mariadb:11.8                  "docker-entrypoint…"     Up 6 minutes (healthy)
-  galera_passbolt   passbolt/passbolt:5.7.0-1-ce   "/bin/bash -ceu /doc…"   Up 6 minutes (healthy)
-  galera_valkey     valkey/valkey:8.1.4-alpine    "docker-entrypoint…"     Up 7 minutes
-  ```
-
-- **Full-stack probe (Galera quorum + passbolt healthcheck)**
-
-  ```bash
-  ./scripts/check-stack.sh
-  ```
-
-  (See the troubleshooting section above for representative output.)
-
-All of the `mariadb` invocations accept `--defaults-file=/etc/mysql/conf.d/docker.cnf` if you prefer not to pass credentials inline. Swap `galera1` for `galera2` or `galera3` to inspect donors/recipients directly during SST or flow-control events.
-
-### Galera terminology cheat sheet
-
-- **Primary component** - the majority group of nodes that has quorum and can process database queries and transactions. Quorum is achieved when more than 50% of the total nodes are in communication. Nodes not in the Primary Component switch to a non-primary state, halting queries and becoming read-only to prevent data discrepancies. This prevents split-brain scenarios where network partitions could lead to parts of the cluster operating independently and accepting conflicting writes. Galera strongly prioritizes Consistency (from CAP theorem), so if quorum is lost, the cluster stops accepting writes until a Primary Component is re-established. Check with `SHOW STATUS LIKE 'wsrep_cluster_status';` - it returns `Primary` when a node belongs to that component. If the value is anything other than `Primary`, the node cannot accept writes and is in non-primary state (read-only).[^14]
-- **`grastate.dat` / `safe_to_bootstrap` / `seqno`** - Galera records the last committed transaction ID (`seqno`) on each node. The node that shut down cleanly with the highest `seqno` sets `safe_to_bootstrap=1`, signalling it can safely bootstrap the cluster after a restart.
-- **SST (State Snapshot Transfer)** - a full copy of the database streamed to a joining node; wipes and replaces the recipient's datadir.
-- **IST (Incremental State Transfer)** - a differential catch-up that replays recent transactions from the donor's Galera cache (GCache). Used when the recipient was offline briefly.
-- **Donor / Recipient** - during SST/IST the donor streams data to the recipient (joining) node; Galera logs call out these roles explicitly.
-- **Flow control / `wsrep_flow_control_paused`** - When a slow node's receive queue exceeds `gcs.fc_limit` (default 100 write-sets), it broadcasts a PAUSE message. All nodes temporarily stop replicating new transactions until the slow node catches up. This metric shows the fraction of time paused since the last `FLUSH STATUS` (0.0 is healthy; 0.2 or higher indicates issues).[^11]
-- **`wsrep_local_state_comment`** - human-readable node state (`Joining`, `Donor`, `Synced`, etc.).
-- **`wsrep_OSU_method` (TOI vs RSU)** - Controls how schema changes (DDL - Data Definition Language statements like `CREATE TABLE`, `ALTER TABLE`, `DROP INDEX`) are applied. Total Order Isolation (TOI) applies DDL cluster-wide simultaneously on all nodes, ensuring schema consistency but blocking the entire cluster during the change. Rolling Schema Upgrade (RSU) temporarily isolates a single node for the change, allowing other nodes to continue serving traffic, but requires careful coordination to avoid schema conflicts.
-- **GCache** - Galera's cache of recent write-sets, used to serve IST. If a recipient's gap exceeds the cache, Galera falls back to SST.
-- **`gcomm://`** - the Galera communication URL. In this lab node 1 uses an empty address list so it can bootstrap; production deployments list every peer host.
-- **`wsrep_provider` / `libgalera_smm.so`** - the Galera replication plugin that MariaDB loads to provide synchronous clustering.
-- **`wsrep_sst_method=rsync`** - instructs Galera to use `rsync` for SST (alternatives include `mariabackup`, `xtrabackup`, etc.).
-- **Garbd (Galera arbitrator)** - a lightweight process that participates in quorum without storing data - useful when you have an even number of database nodes.
-
----
-
-## Troubleshooting Notes
-
-- **Bash 3 vs 5:** macOS ships with Bash 3.2, but the certificate generation script requires Bash 4 or later. Install a newer version (e.g., via Homebrew: `/opt/homebrew/bin/bash`) and call it explicitly in the script or your shell.
-
-- **MariaDB Health Checks:** The MariaDB Docker image uses `mariadb-admin` instead of the older `mysqladmin` command. When writing health checks, use `mariadb-admin` and connect via the Unix socket to bypass TLS hostname validation issues.
-
-- **Passbolt Cache Engine:** Passbolt expects a single backslash in the cache classname environment variable. A mis-escaped value like `Cake\\Cache\\Engine\\RedisEngine` (double backslash) causes the application bootstrap to fail. Ensure your `.env` has `CACHE_CAKECORE_CLASSNAME: 'Cake\Cache\Engine\RedisEngine'` with a single backslash.
-
-- **Port Exposure:** This lab exposes Passbolt on port `443` to simplify local navigation. In production, Passbolt typically sits behind a reverse proxy (like nginx or Apache) or a load balancer that handles TLS termination and routing.
-
-- **Smoke tests:** The `./scripts/check-stack.sh` script validates both Galera cluster health and Passbolt's healthcheck endpoint. Run it anytime to re-validate the stack without repeating the full bring-up sequence.
-
----
-
 ## Operating & Managing the Cluster
 
-The goal is to give a MariaDB administrator familiar tasks (restart, backup, restore, migrate) and show the Galera-specific twists. Every walkthrough below mirrors the MariaDB Galera documentation so you can apply the same flow to physical or cloud hosts.[^2] If you bump into terms like SST, IST, or flow control while reading, refer back to the [Galera terminology cheat sheet](#galera-terminology-cheat-sheet) just above.
+My goal here is to walk you through familiar MariaDB administrator tasks (restart, backup, restore, migrate) and show the Galera-specific twists. Every walkthrough below mirrors the MariaDB Galera documentation so you can apply the same flow to physical or cloud hosts.[^2] If you bump into terms like SST, IST, or flow control while reading, refer to the [Galera terminology cheat sheet](#galera-terminology-cheat-sheet) in the reference section below.
 
 ### Bootstrap and recovery
 
@@ -632,55 +424,44 @@ Steps:
 
 Why: Galera's consensus layer exposes extra status variables; treat them as first-class SLO signals.
 
-Steps:
-
-1. Run `SHOW GLOBAL STATUS LIKE 'wsrep_cluster_size';` and `'wsrep_local_state_comment';` to prove quorum and node state (`Synced`, `Donor`, `Joining`—all defined in the [terminology cheat sheet](#galera-terminology-cheat-sheet)).  
-2. Watch `'wsrep_flow_control_paused';` values near 0.0 are healthy; 0.2 or higher indicates a performance bottleneck (a slow node is causing the cluster to pause replication).[^11]  
-3. Tail `/var/log/mysql/galera*.err` for `Flow control paused` or `Non-Primary view` entries so you catch congestion or split-brain conditions early.
-
 ### WAN clustering
 
-Why: Synchronous replication works over WAN networks. The delay is proportional to network round-trip time (RTT) and affects commit operations - reads execute instantly from the local node, but writes must wait for commit acknowledgment from all nodes.[^9]
+Why: Deploying Galera nodes across Wide Area Networks (WAN) enables disaster recovery and geographic distribution, but requires careful configuration to handle latency and network characteristics.
 
-**How WAN clustering works:**
+**Important considerations:**
 
-Unlike traditional async replication where writes return immediately and replicas catch up later, Galera waits for acknowledgment from every node before the transaction commits. The user experience:
+Galera's synchronous replication means **all writes must complete on all nodes before a transaction commits**. This makes WAN deployments heavily prone to latency issues:
 
-1. **Reads execute instantly** from the local node - no WAN latency, no waiting
-2. **Write operations execute locally** on the nearest node - the SQL runs fast
-3. **The commit waits** for WAN round-trips to all nodes - this is what the user experiences
-
-If you have nodes in New York, London, and Tokyo, a write transaction:
-
-- Executes the SQL locally in New York (fast, ~1ms)
-- Waits for commit acknowledgment from London (~70ms RTT) and Tokyo (~140ms RTT)
-- Returns success to the application only after all nodes acknowledge (total ~200ms+)
-
-So yes, the user does wait for the WAN round-trips - the commit latency is part of every write transaction. The benefit is that reads are instant (no WAN latency) and the SQL execution itself is fast (only the commit coordination adds latency). For read-heavy workloads or applications where occasional slower writes are acceptable, this trade-off can work. However, high write throughput applications will feel the commit latency on every transaction.[^9]
+- Every write operation waits for network round-trip time (RTT) to all nodes
+- High latency (e.g., 100ms+ between data centers) significantly impacts write performance
+- Network partitions or transient failures can cause nodes to enter non-primary state
 
 **When WAN clustering makes sense:**
 
-- **Latency eraser:** With nodes located close to clients, read operations are instant and write SQL execution is fast. The RTT delay affects commit time (users do wait for this), but this can be acceptable for read-heavy workloads where users experience fast browsing and occasional slower writes are tolerable.[^9]
-
-- **Disaster recovery:** One data center can be passive, only receiving replication events without processing client transactions. The remote data center stays up to date at all times with no data loss. During recovery, the spare site is nominated as primary and applications continue with minimal failover delay.[^9]
-
-- **Read-heavy workloads with geographic distribution:** Client applications can be directed to the topologically closest node, reducing network latency for read operations. Users get fast reads from their local node, and occasional writes pay the commit latency penalty.[^12]
+- **Disaster recovery**: Secondary site stays in sync for fast failover
+- **Read-heavy workloads**: Reads execute locally (fast), only writes are affected by latency
+- **Low write volume**: If writes are infrequent, latency impact is acceptable
+- **Geographic distribution**: Users in different regions can read from local nodes
 
 **When to avoid WAN clustering:**
 
-- High write throughput applications (every write waits for WAN round-trips)
-- Latency-sensitive workloads (user-facing transactions that must feel instant)
-- Unreliable WAN links (packet loss causes flow control pauses and timeouts)
+- **High write throughput**: Latency will severely impact performance
+- **Latency-sensitive applications**: Users will notice the delay on every write
+- **Unreliable WAN links**: Frequent partitions will cause constant state transfers
 
 **Configuration for WAN deployments:**
 
-1. **Quorum requirements:** You need an odd number of nodes and an odd number of locations to maintain quorum. A typical setup is three data centers with one or more nodes in each.[^12]
+1. **Ensure quorum with `garbd` (Galera Arbitrator)** if you have an even number of nodes per site to avoid split-brain during network partitions.
 
-2. **Network latency:** The round-trip time between the most distant nodes sets the baseline for transaction commit latency. Keep RTT under a few milliseconds if possible; above 5-10ms, writes will feel sluggish because every transaction waits for consensus.[^2] For true multi-site active-active, you need dedicated low-latency links (not commodity internet).
+2. **Set appropriate timeouts** to tolerate WAN latency and transient failures:
 
-3. **Network stability:** The WAN link must be stable and reliable. Frequent network partitions can lead to nodes being evicted from the cluster, impacting stability. Monitor `wsrep_local_recv_queue_avg` to detect nodes struggling to keep up (high or increasing values suggest network issues or node performance problems).
+   ```ini
+   wsrep_provider_options = "evs.keepalive_period = PT3S; evs.suspect_timeout = PT30S; evs.inactive_timeout = PT1M; evs.install_timeout = PT1M"
+   ```
 
-4. **Use segmentation to optimize traffic patterns:**
+   These parameters can tolerate 30-second connectivity outages. **Important:** All `wsrep_provider_options` settings must be specified on a single line; if you have multiple instances, only the last one is used. Set `evs.suspect_timeout` as high as possible to avoid partitions (which cause state transfers and impact performance). You must set `evs.inactive_timeout` higher than `evs.suspect_timeout`, and `evs.install_timeout` higher than `evs.inactive_timeout`.[^13]
+
+3. **Use segmentation to optimize traffic patterns:**
 
    ```ini
    # Nodes in data center A
@@ -692,28 +473,310 @@ So yes, the user does wait for the WAN round-trips - the commit latency is part 
 
    Group nodes with `gmcast.segment` so intra-site traffic stays local (terminology recap in the [cheat sheet](#galera-terminology-cheat-sheet)). This reduces cross-WAN chatter for operations that don't require global consensus.[^12]
 
-5. **Increase timeouts to tolerate WAN characteristics:**
+4. **Add a Galera Arbitrator (`garbd`)** if you only have two DB nodes per site to avoid split-brain scenarios during network partitions.
 
-   ```ini
-   wsrep_provider_options = "evs.keepalive_period = PT3S; evs.suspect_timeout = PT30S; evs.inactive_timeout = PT1M; evs.install_timeout = PT1M"
+### Restore a node from scratch
+
+Practice the donor/recipient flow by wiping a node and letting it rejoin via SST (see [terminology](#galera-terminology-cheat-sheet) for a refresher on SST vs IST and donor roles).
+
+```bash
+# Stop the target node (galera2 in this example)
+docker compose stop galera2
+
+# Remove its data directory so SST is required
+docker compose run --rm galera2 bash -c 'rm -rf /var/lib/mysql/*'
+
+# Bring the node back and observe donor selection (watch for "State transfer" in logs)
+docker compose up -d galera2
+
+# Confirm cluster size returns to 3
+docker compose exec galera1 mariadb \
+  -uroot -p"$MARIADB_ROOT_PASSWORD" \
+  -e "SHOW STATUS LIKE 'wsrep_cluster_size';"
+```
+
+Expected result: `wsrep_cluster_size` reports `Value: 3` after SST completes. If it stalls, check `docker compose logs galera2` for credential or certificate errors (and confirm whether the join fell back to SST or IST - see the [terminology cheat sheet](#galera-terminology-cheat-sheet)).
+
+### Backup and restore rehearsal
+
+This flow captures a physical backup from a replica node, prepares it, and restores it onto `galera1`.
+
+```bash
+# Take a hot backup from galera2
+docker compose exec galera2 mariabackup --backup --target-dir=/tmp/backup
+
+# Prepare the backup for restore
+docker compose exec galera2 mariabackup --prepare --target-dir=/tmp/backup
+
+# Stop galera1 and wipe its datadir
+docker compose stop galera1
+docker compose run --rm galera1 bash -c 'rm -rf /var/lib/mysql/*'
+
+# Copy the prepared backup into galera1's datadir
+docker compose exec galera2 bash -c 'tar -C /tmp/backup -cf - .' | \
+  docker compose exec -T galera1 bash -c 'tar -C /var/lib/mysql -xf -'
+
+# Bring galera1 back online and verify cluster health
+docker compose up -d galera1
+./scripts/check-stack.sh
+```
+
+If `check-stack.sh` reports a failure, inspect `docker compose logs galera1` to ensure the restored files have the correct ownership (`mysql:mysql`) and permissions.
+
+### Flip passbolt to another writer
+
+Simulate an application-level failover by pointing passbolt at a different node. This is useful when you need to perform maintenance on the current writer (e.g., restarting `galera1` while it has `wsrep_cluster_address=gcomm://` - see [Restarting the bootstrap node](#restarting-the-bootstrap-node-galera1)).
+
+**Before flipping:** Verify the target node is in Primary Component and can accept writes:
+
+```bash
+# Check that galera2 is in Primary Component
+docker compose exec -e MYSQL_PWD="$MARIADB_ROOT_PASSWORD" galera2 mariadb \
+  -uroot \
+  -e "SHOW STATUS LIKE 'wsrep_cluster_status';"
+```
+
+You should see `wsrep_cluster_status` with value `Primary`. If it shows `Non-Primary`, the node is in non-primary state (read-only) and cannot accept writes - do not flip to it.
+
+**Flip to the new writer:**
+
+```bash
+# Update the target host in .env (set to galera2.local)
+sed -i '' 's/^DATASOURCES_DEFAULT_HOST=.*/DATASOURCES_DEFAULT_HOST=galera2.local/' .env
+
+# Restart the application container so it picks up the change
+docker compose up -d passbolt
+
+# Run the health check to confirm passbolt can reach galera2
+./scripts/check-stack.sh
+```
+
+**Restore the original host** (`galera1.local`) when you're done:
+
+```bash
+sed -i '' 's/^DATASOURCES_DEFAULT_HOST=.*/DATASOURCES_DEFAULT_HOST=galera1.local/' .env
+docker compose up -d passbolt
+./scripts/check-stack.sh
+```
+
+**Why this matters:** In Galera, all nodes in the Primary Component can accept writes, but nodes not in the Primary Component enter a non-primary state (read-only) and halt query processing. Flipping to a non-primary node would cause all database writes to fail. The Primary Component is the majority group of nodes (more than 50%) that can process transactions; nodes outside it are prevented from accepting writes to avoid split-brain scenarios (see the [terminology cheat sheet](#galera-terminology-cheat-sheet) for details).
+
+---
+
+## Playbooks
+
+Here are some hands-on exercises I've put together to practice common operational tasks. These build on the concepts explained in [Operating & Managing the Cluster](#operating--managing-the-cluster) above.
+
+### Rotate TLS certificates with a controlled pause
+
+Use this drill to rotate the certificates without blowing away the cluster volumes. The cluster is paused briefly while the certificates are replaced; in production you'd point applications at another writer (or stagger node restarts) if you require continuous service.
+
+1. Quiesce the application:
+
+   ```bash
+   docker compose stop passbolt
    ```
 
-   These parameters can tolerate 30-second connectivity outages. **Important:** All `wsrep_provider_options` settings must be specified on a single line; if you have multiple instances, only the last one is used. Set `evs.suspect_timeout` as high as possible to avoid partitions (which cause state transfers and impact performance). You must set `evs.inactive_timeout` higher than `evs.suspect_timeout`, and `evs.install_timeout` higher than `evs.inactive_timeout`.[^13]
+2. Stop the database nodes in reverse order so the primary is last to shut down. This ensures `galera1` records `safe_to_bootstrap=1` in its `grastate.dat` (see [terminology](#galera-terminology-cheat-sheet)).
 
-6. **Add a Galera Arbitrator (`garbd`)** if you only have two DB nodes per site to avoid split-brain scenarios during network partitions.
+   ```bash
+   docker compose stop galera3
+   docker compose stop galera2
+   docker compose stop galera1
+   ```
+
+   Optional sanity check:
+
+   ```bash
+   docker compose run --rm galera1 cat /var/lib/mysql/grastate.dat
+   ```
+
+   You should see `safe_to_bootstrap: 1`. If not, identify the node with the highest `seqno` and set its flag to `1` before continuing (details in the [terminology cheat sheet](#galera-terminology-cheat-sheet)).
+
+3. Regenerate the TLS material:
+
+   ```bash
+   /opt/homebrew/bin/bash ./scripts/generate-certs.sh
+   ```
+
+4. Bring the cluster back online:
+
+   ```bash
+   docker compose up -d galera1
+   docker compose up -d galera2
+   docker compose up -d galera3
+   ```
+
+   Wait for `galera1` to report `healthy` (`docker compose ps`) before starting the peers.
+
+5. Restart passbolt and verify the stack:
+
+   ```bash
+   docker compose up -d passbolt
+   ./scripts/check-stack.sh
+   ```
+
+If `check-stack.sh` fails, inspect the relevant logs (`docker compose logs --tail=100 passbolt galera1`) and confirm the regenerated certificates exist under `certs/` with hostnames that match your `.env`.
+
+---
+
+## Reference Materials
+
+### Galera monitoring quick reference
+
+Drop these commands into your shell while the lab is running; they work against the Compose services I've set up in this repo. In the examples below I lean on `MYSQL_PWD="$MARIADB_ROOT_PASSWORD"` so you don't have to fight with shell quoting.
+
+- **Cluster summary (quorum, size, state, peer list)**
+
+  Check quorum and Primary Component status. For a healthy cluster, `wsrep_cluster_status` must be `Primary` on all nodes. If it's anything else, the node cannot accept writes:
+
+  ```bash
+  docker compose exec -e MYSQL_PWD="$MARIADB_ROOT_PASSWORD" galera1 mariadb \
+    -uroot \
+    -e "SHOW GLOBAL STATUS WHERE Variable_name IN ('wsrep_cluster_size','wsrep_local_state_comment','wsrep_cluster_status','wsrep_incoming_addresses');"
+  ```
+
+  ```text
+  Variable_name     Value
+  wsrep_local_state_comment  Synced
+  wsrep_incoming_addresses   galera1.local:0,galera2.local:0,galera3.local:0
+  wsrep_cluster_size  3
+  wsrep_cluster_status Primary
+  ```
+
+  **Understanding the values:**
+  - `wsrep_cluster_status=Primary`: Node belongs to the Primary Component and can accept writes. Any other value means the node is in non-primary state (read-only) and cannot process transactions.
+  - `wsrep_cluster_size`: Number of nodes in the current component. Should match your expected total (3 in this lab). If it's less than expected, some nodes may have lost connectivity.
+  - `wsrep_cluster_state_uuid` and `wsrep_cluster_conf_id`: Must be identical across all nodes. If they differ, nodes are in different components (split-brain scenario). For a healthy cluster, these values must be the same on every node.
+
+- **Flow-control pressure (fraction of time paused; 0.0 is healthy, 0.2+ indicates issues)**
+
+  ```bash
+  docker compose exec -e MYSQL_PWD="$MARIADB_ROOT_PASSWORD" galera1 mariadb \
+    -uroot \
+    -e "SHOW STATUS LIKE 'wsrep_flow_control_paused';"
+  ```
+
+  ```text
+  Variable_name     Value
+  wsrep_flow_control_paused  0
+  ```
+
+- **Receive queue size (high or increasing values indicate a slow node)**
+
+  ```bash
+  docker compose exec -e MYSQL_PWD="$MARIADB_ROOT_PASSWORD" galera1 mariadb \
+    -uroot \
+    -e "SHOW STATUS LIKE 'wsrep_local_recv_queue_avg';"
+  ```
+
+  ```text
+  Variable_name     Value
+  wsrep_local_recv_queue_avg  0.5
+  ```
+
+  A high or increasing value suggests a node struggling to keep up, likely triggering flow control. This is especially important to monitor in WAN deployments where network latency can cause queues to grow.
+
+- **Current cluster members and their advertised addresses**
+
+  ```bash
+  docker compose exec -e MYSQL_PWD="$MARIADB_ROOT_PASSWORD" galera1 mariadb \
+    -uroot \
+    -e "SELECT node_name, node_incoming_address FROM mysql.wsrep_cluster_members;"
+  ```
+
+  ```text
+  node_name  node_incoming_address
+  galera1    galera1.local:0
+  galera2    galera2.local:0
+  galera3    galera3.local:0
+  ```
+
+- **Recent Galera log entries (joins, SST progress, authentication issues)**
+
+  ```bash
+  docker compose exec galera1 tail -n 5 /var/lib/mysql/galera1.err
+  ```
+
+  ```text
+  2025-11-13  5:19:00 0 [Note] WSREP: 2.0 (galera3): State transfer from 1.0 (galera2) complete.
+  2025-11-13  5:19:00 0 [Note] WSREP: Member 2.0 (galera3) synced with group.
+  2025-11-13  5:19:00 0 [Note] WSREP: (379a49b9-834c, 'ssl://0.0.0.0:4567') turning message relay requesting off
+  2025-11-13  5:23:51 57 [Warning] Access denied for user 'root'@'localhost' (using password: NO)
+  2025-11-13  5:24:02 60 [Warning] Access denied for user 'root'@'localhost' (using password: NO)
+  ```
+
+- **Container health overview**
+
+  ```bash
+  docker compose ps
+  ```
+
+  ```text
+  NAME              IMAGE                         COMMAND                  STATUS
+  galera_galera1    mariadb:11.8                  "docker-entrypoint…"     Up 6 minutes (healthy)
+  galera_galera2    mariadb:11.8                  "docker-entrypoint…"     Up 6 minutes (healthy)
+  galera_galera3    mariadb:11.8                  "docker-entrypoint…"     Up 6 minutes (healthy)
+  galera_passbolt   passbolt/passbolt:5.7.0-1-ce   "/bin/bash -ceu /doc…"   Up 6 minutes (healthy)
+  galera_valkey     valkey/valkey:8.1.4-alpine    "docker-entrypoint…"     Up 7 minutes
+  ```
+
+- **Full-stack probe (Galera quorum + passbolt healthcheck)**
+
+  ```bash
+  ./scripts/check-stack.sh
+  ```
+
+  (See the troubleshooting section below for representative output.)
+
+All of the `mariadb` invocations accept `--defaults-file=/etc/mysql/conf.d/docker.cnf` if you prefer not to pass credentials inline. Swap `galera1` for `galera2` or `galera3` to inspect donors/recipients directly during SST or flow-control events.
+
+### Galera terminology cheat sheet
+
+- **Primary component** - the majority group of nodes that has quorum and can process database queries and transactions. Quorum is achieved when more than 50% of the total nodes are in communication. Nodes not in the Primary Component switch to a non-primary state, halting queries and becoming read-only to prevent data discrepancies. This prevents split-brain scenarios where network partitions could lead to parts of the cluster operating independently and accepting conflicting writes. Galera strongly prioritizes Consistency (from CAP theorem), so if quorum is lost, the cluster stops accepting writes until a Primary Component is re-established. Check with `SHOW STATUS LIKE 'wsrep_cluster_status';` - it returns `Primary` when a node belongs to that component. If the value is anything other than `Primary`, the node cannot accept writes and is in non-primary state (read-only).[^14]
+- **`grastate.dat` / `safe_to_bootstrap` / `seqno`** - Galera records the last committed transaction ID (`seqno`) on each node. The node that shut down cleanly with the highest `seqno` sets `safe_to_bootstrap=1`, signalling it can safely bootstrap the cluster after a restart.
+- **SST (State Snapshot Transfer)** - a full copy of the database streamed to a joining node; wipes and replaces the recipient's datadir.
+- **IST (Incremental State Transfer)** - a differential catch-up that replays recent transactions from the donor's Galera cache (GCache). Used when the recipient was offline briefly.
+- **Donor / Recipient** - during SST/IST the donor streams data to the recipient (joining) node; Galera logs call out these roles explicitly.
+- **Flow control / `wsrep_flow_control_paused`** - When a slow node's receive queue exceeds `gcs.fc_limit` (default 100 write-sets), it broadcasts a PAUSE message. All nodes temporarily stop replicating new transactions until the slow node catches up. This metric shows the fraction of time paused since the last `FLUSH STATUS` (0.0 is healthy; 0.2 or higher indicates issues).[^11]
+- **`wsrep_local_state_comment`** - human-readable node state (`Joining`, `Donor`, `Synced`, etc.).
+- **`wsrep_OSU_method` (TOI vs RSU)** - Controls how schema changes (DDL - Data Definition Language statements like `CREATE TABLE`, `ALTER TABLE`, `DROP INDEX`) are applied. Total Order Isolation (TOI) applies DDL cluster-wide simultaneously on all nodes, ensuring schema consistency but blocking the entire cluster during the change. Rolling Schema Upgrade (RSU) temporarily isolates a single node for the change, allowing other nodes to continue serving traffic, but requires careful coordination to avoid schema conflicts.
+- **GCache** - Galera's cache of recent write-sets, used to serve IST. If a recipient's gap exceeds the cache, Galera falls back to SST.
+- **`gcomm://`** - the Galera communication URL. In this lab node 1 uses an empty address list so it can bootstrap; production deployments list every peer host.
+- **`wsrep_provider` / `libgalera_smm.so`** - the Galera replication plugin that MariaDB loads to provide synchronous clustering.
+- **`wsrep_sst_method=rsync`** - instructs Galera to use `rsync` for SST (alternatives include `mariabackup`, `xtrabackup`, etc.).
+- **Garbd (Galera arbitrator)** - a lightweight process that participates in quorum without storing data - useful when you have an even number of database nodes.
 
 ### Configuration deep dive
 
-Why: Most "normal" MariaDB knobs still apply; these are the Galera-specific ones to carry into production.
+I'll explain why these matter: Most "normal" MariaDB knobs still apply; these are the Galera-specific ones to carry into production.
 
-1. `wsrep_cluster_address=gcomm://` on node 1 is a lab shortcut so an empty datadir bootstraps automatically. In production list every peer FQDN so the node rejoins the existing component instead. **Important:** If you restart `galera1` while other nodes are running, you must temporarily change this to list all members (see [Restarting the bootstrap node](#bring-a-node-back) for details).[^6]  
+1. I've set `wsrep_cluster_address=gcomm://` on node 1 as a lab shortcut so an empty datadir bootstraps automatically. In production you'd list every peer FQDN so the node rejoins the existing component instead. **Important:** If you restart `galera1` while other nodes are running, you must temporarily change this to list all members (see [Restarting the bootstrap node](#bring-a-node-back) for details).[^6]  
 2. TLS directives (`socket.ssl_ca`, `socket.ssl_cert`, `socket.ssl_key`) and `require_secure_transport=ON` keep both replication and client traffic encrypted; match them to your site-issued certificates.[^5]  
-3. The repo drops its overrides into `/etc/mysql/mariadb.conf.d/z-custom-my.cnf`, following MariaDB's advice to keep vendor configs untouched for easier upgrades.[^5]
+3. I've structured the repo to drop its overrides into `/etc/mysql/mariadb.conf.d/z-custom-my.cnf`, following MariaDB's advice to keep vendor configs untouched for easier upgrades.[^5]
 
-### Next steps
+---
+
+## Troubleshooting Notes
+
+- **Bash 3 vs 5:** macOS ships with Bash 3.2, but the certificate generation script requires Bash 4 or later. Install a newer version (e.g., via Homebrew: `/opt/homebrew/bin/bash`) and call it explicitly in the script or your shell.
+
+- **MariaDB Health Checks:** The MariaDB Docker image uses `mariadb-admin` instead of the older `mysqladmin` command. When writing health checks, use `mariadb-admin` and connect via the Unix socket to bypass TLS hostname validation issues.
+
+- **Passbolt Cache Engine:** Passbolt expects a single backslash in the cache classname environment variable. A mis-escaped value like `Cake\\Cache\\Engine\\RedisEngine` (double backslash) causes the application bootstrap to fail. Ensure your `.env` has `CACHE_CAKECORE_CLASSNAME: 'Cake\Cache\Engine\RedisEngine'` with a single backslash.
+
+- **Port Exposure:** This lab exposes Passbolt on port `443` to simplify local navigation. In production, Passbolt typically sits behind a reverse proxy (like nginx or Apache) or a load balancer that handles TLS termination and routing.
+
+- **Smoke tests:** The `./scripts/check-stack.sh` script validates both Galera cluster health and Passbolt's healthcheck endpoint. Run it anytime to re-validate the stack without repeating the full bring-up sequence.
+
+---
+
+## Next Steps
+
+Here's what I'm planning to tackle next (and what you might want to explore too):
 
 1. Automate the Passbolt GPG fingerprint/JWT provisioning immediately after bootstrap so the healthcheck is clean.  
-2. Revisit ProxySQL or HAProxy once the TLS frontend issue mentioned earlier is resolved; either proxy can front the Galera writer hostgroup for the application.  
+2. Revisit ProxySQL or HAProxy once the TLS frontend issue I mentioned earlier is resolved; either proxy can front the Galera writer hostgroup for the application.  
 3. Schedule recurring `mariabackup` exports to external storage and rehearse the restore flow so the wider Passbolt HA pattern is battle-tested.[^1]
 
 [^1]: [How to Set-Up a Highly-Available Passbolt Environment](https://www.passbolt.com/blog/how-to-set-up-a-highly-available-passbolt-environment)
