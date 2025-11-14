@@ -250,8 +250,7 @@ The cipher check above (`Ssl_cipher`) confirms that client connections are succe
 
 ## Step 3 - Start Valkey and Passbolt
 
-> **Why no ProxySQL?**  
-> I initially tried to include ProxySQL, but its Docker image currently ships without a full certificate chain on its frontend listener, which causes strict clients to reject the TLS handshake (see [issue #3788](https://github.com/sysown/proxysql/issues/3788)). Rather than keep a broken proxy in the loop, I've connected Passbolt directly to the Galera nodes. You can reintroduce HAProxy/ProxySQL later if you need health-aware load balancing.
+I've included Valkey (the Redis-compatible fork) in this lab because it takes load off the database by handling Passbolt's session storage and caching. Even with less than 50 users, this is a good choice. It reduces database connections and improves overall performance. You can add HAProxy or ProxySQL later if you need health-aware load balancing, but I wanted to keep the initial setup straightforward.
 
 With the database tier stable, launch the remaining services:
 
@@ -776,7 +775,7 @@ I'll explain why these matter: Most "normal" MariaDB knobs still apply; these ar
 Here's what I'm planning to tackle next (and what you might want to explore too):
 
 1. Automate the Passbolt GPG fingerprint/JWT provisioning immediately after bootstrap so the healthcheck is clean.  
-2. Revisit ProxySQL or HAProxy once the TLS frontend issue I mentioned earlier is resolved; either proxy can front the Galera writer hostgroup for the application.  
+2. Add HAProxy or ProxySQL if you need health-aware load balancing for the application.  
 3. Schedule recurring `mariabackup` exports to external storage and rehearse the restore flow so the wider Passbolt HA pattern is battle-tested.[^1]
 
 [^1]: [How to Set-Up a Highly-Available Passbolt Environment](https://www.passbolt.com/blog/how-to-set-up-a-highly-available-passbolt-environment)
