@@ -30,12 +30,12 @@ If you're planning to deploy this to actual infrastructure, here's what stays th
 **What you'll need to adapt:**
 
 - **Network configuration**: Replace `.local` hostnames with actual FQDNs (e.g., `galera1.example.com`) and ensure DNS resolution works across your network segments
-- **Certificate distribution**: Instead of mounting volumes, copy certificates to standard locations (`/etc/mysql/ssl/` for server certs, `/etc/passbolt/ssl/` for client certs) with appropriate permissions
+- **Certificate distribution**: Instead of mounting volumes, copy certificates to standard locations (`/etc/mysql/ssl/` for server certs, `/etc/passbolt/db-*.crt` for client certs) with appropriate permissions
 - **Firewall rules**: Open ports 3306 (MariaDB), 4567 (Galera replication), and 4444 (SST) between nodes, plus 443 for Passbolt
 - **Service management**: Use systemd or your init system instead of Docker health checks
 - **Resource allocation**: Ensure adequate RAM for each MariaDB node (Galera keeps the entire dataset in memory during replication), and plan for network bandwidth between data centers if doing WAN clustering
 
-The TLS configuration especially shines on physical servers: when your nodes are in different subnets or data centers, mutual TLS becomes the security layer that makes the distributed topology safe. You can deploy `galera1` in one rack, `galera2` in another, and `galera3` across a WAN link, and as long as they can reach each other's IPs and have valid certificates, the cluster will form and replicate securely.
+The TLS configuration especially shines on physical servers: when your nodes are in different subnets or data centers, mutual TLS becomes the security layer that makes the distributed topology safe. You can deploy `galera1.example.com` in one rack, `galera2.example.com` in another, and `galera3.example.com` across a WAN link. As long as DNS resolves the hostnames and the certificates are valid, the cluster forms and replicates securely.
 
 I've structured the configuration files in this repo to mirror production layouts, so you can literally copy the `.cnf` files and SQL scripts to your servers after updating hostnames and paths. The Docker setup is just a convenient way to test the same configurations locally before rolling them out.
 
@@ -255,7 +255,7 @@ If you see an empty value or `NULL`, TLS is not active and you should check your
 
 I've configured this lab to enforce TLS encryption for all database traffic:
 
-- **Galera replication (node-to-node)**: Each node uses certificates (`server-cert.pem`, `server-key.pem`, `ca.pem`) configured via `wsrep_provider_options` in `galera.cnf`. This ensures state transfers (SST/IST) and replication traffic between nodes is encrypted and authenticated.
+- **Galera replication (node-to-node)**: Each node uses certificates (`server-cert.pem`, `server-key.pem`, `ca.pem`) configured via `wsrep_provider_options` in `galera.cnf`. This ensures replication traffic and IST (Incremental State Transfer) between nodes is encrypted and authenticated. SST (State Snapshot Transfer) encryption is out of scope for this lab, which focuses on demonstrating mTLS for replication and client connections.
 
 - **Client connections (application-to-database)**: Passbolt connects to MariaDB using client certificates (`db-client.crt`, `db-client.key`) and the server requires TLS via `ALTER USER 'passbolt'@'%' REQUIRE SSL;` in `config/mariadb/init/02-enforce-ssl.sql`. This is mutual TLS (mTLS) - both sides authenticate each other.[^3]
 
@@ -760,7 +760,7 @@ All of the `mariadb` invocations accept `--defaults-file=/etc/mysql/conf.d/docke
 - **`wsrep_local_recv_queue_avg`** - The average number of write-sets that have been received from other nodes but haven't yet been applied to this node's database since the last `FLUSH STATUS` command (or since server start if never flushed). Small values (like `0.08`, `0.1`, or `0.5`) are common and normal, especially during startup or load spikes. The real concern is when values are consistently high (approaching `gcs.fc_limit`, default 100 write-sets) or steadily increasing over time, which can trigger flow control. If persistently high, consider increasing `wsrep_slave_threads` (but not higher than CPU core count). The value resets after each `FLUSH STATUS` command.
 - **`wsrep_local_state_comment`** - human-readable node state (`Joining`, `Donor`, `Synced`, etc.).
 - **`wsrep_OSU_method` (TOI vs RSU)** - Controls how schema changes (DDL - Data Definition Language statements like `CREATE TABLE`, `ALTER TABLE`, `DROP INDEX`) are applied. Total Order Isolation (TOI) applies DDL cluster-wide simultaneously on all nodes, ensuring schema consistency but blocking the entire cluster during the change. Rolling Schema Upgrade (RSU) temporarily isolates a single node for the change, allowing other nodes to continue serving traffic, but requires careful coordination to avoid schema conflicts.
-- **GCache** - Galera's cache of recent write-sets, used to serve IST. If a recipient's gap exceeds the cache, Galera falls back to SST.
+- **GCache** - Galera's cache of recent write-sets, used to serve IST. If a recipient's gap exceeds the cache, Galera falls back to SST. Larger GCache size (`gcache.size` in `wsrep_provider_options`) allows nodes to be offline longer before falling back to SST. This lab sets 512M, but production deployments should size based on write rate and desired offline tolerance.
 - **`gcomm://`** - the Galera communication URL. In this lab node 1 uses an empty address list so it can bootstrap; production deployments list every peer host.
 - **`wsrep_provider` / `libgalera_smm.so`** - the Galera replication plugin that MariaDB loads to provide synchronous clustering.
 - **`wsrep_sst_method=rsync`** - instructs Galera to use `rsync` for SST (alternatives include `mariabackup`, `xtrabackup`, etc.).
@@ -794,9 +794,8 @@ I'll explain why these matter: Most "normal" MariaDB knobs still apply; these ar
 
 Here's what I'm planning to tackle next (and what you might want to explore too):
 
-1. Automate the Passbolt GPG fingerprint/JWT provisioning immediately after bootstrap so the healthcheck is clean.  
-2. Add HAProxy or ProxySQL if you need health-aware load balancing for the application.  
-3. Schedule recurring `mariabackup` exports to external storage and rehearse the restore flow so the wider Passbolt HA pattern is battle-tested.[^1]
+1. Add HAProxy or ProxySQL if you need health-aware load balancing for the application.  
+2. Schedule recurring `mariabackup` exports to external storage and rehearse the restore flow so the wider Passbolt HA pattern is battle-tested.[^1]
 
 [^1]: [How to Set-Up a Highly-Available Passbolt Environment](https://www.passbolt.com/blog/how-to-set-up-a-highly-available-passbolt-environment)
 [^2]: [MariaDB Galera Cluster Usage Guide](https://mariadb.com/docs/galera-cluster/readme/mariadb-galera-cluster-usage-guide)
