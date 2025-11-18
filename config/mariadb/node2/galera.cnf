@@ -17,7 +17,8 @@ wsrep_cluster_name=passbolt_galera
 
 # List all cluster members so this node can join the existing cluster.
 # In production, use FQDNs: gcomm://galera1.example.com,galera2.example.com,galera3.example.com
-wsrep_cluster_address=gcomm://galera1,galera2,galera3
+# In this lab, we use .local aliases (defined in docker-compose.yaml) which match the certificate SANs.
+wsrep_cluster_address=gcomm://galera1.local,galera2.local,galera3.local
 wsrep_node_name=galera2
 
 # Node's advertised address for replication traffic (port 4567 is Galera's default).
@@ -25,7 +26,9 @@ wsrep_node_name=galera2
 # In this lab we resolve galera2.local via /etc/hosts to 127.0.0.1.
 wsrep_node_address=galera2.local:4567
 
-# State Snapshot Transfer method (rsync is simple but slow; mariabackup is faster for production).
+# State Snapshot Transfer method.
+# rsync is the default and fastest method for large datasets.
+# SST encryption is out of scope for this lab (SST is for catastrophic recovery scenarios).
 wsrep_sst_method=rsync
 wsrep_sst_receive_address=galera2:4444
 
@@ -33,7 +36,10 @@ wsrep_sst_receive_address=galera2:4444
 # These certificates enable node-to-node authentication and encryption.
 # Each node presents its server certificate and verifies peers using the CA.
 # This is mTLS because both sides authenticate each other, not just the client checking the server.
-wsrep_provider_options="socket.ssl_cert=/etc/mysql/ssl/server-cert.pem;socket.ssl_key=/etc/mysql/ssl/server-key.pem;socket.ssl_ca=/etc/mysql/ssl/ca.pem"
+# GCache size: Larger GCache allows nodes to be offline longer and still use IST instead of SST.
+# Default is 128M. For production, size based on write rate and desired offline tolerance.
+# Example: 1GB allows ~1 hour of offline time at moderate write rates before falling back to SST.
+wsrep_provider_options="socket.ssl_cert=/etc/mysql/ssl/server-cert.pem;socket.ssl_key=/etc/mysql/ssl/server-key.pem;socket.ssl_ca=/etc/mysql/ssl/ca.pem;gcache.size=512M"
 
 # TLS for client connections (Passbolt application).
 # These are the server-side certificates that clients verify.

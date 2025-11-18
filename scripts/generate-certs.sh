@@ -7,6 +7,11 @@
 #   * Galera nodes (server cert + key + CA)
 #   * Passbolt database client certificate
 #
+# Each certificate includes Subject Alternative Names (SANs) to support multiple
+# hostname formats. Galera node certificates include both the short hostname
+# (e.g., galera1) and the .local alias (e.g., galera1.local) in the SANs, allowing
+# connections to validate using either format.
+#
 # Certificates are regenerated on demand by start-lab.sh (--force-certs) or can
 # be invoked manually. This script is destructive: it wipes the existing certs
 # directory before generating new material.

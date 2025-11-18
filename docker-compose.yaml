@@ -106,7 +106,7 @@ services:
       galera_net:
 
   passbolt:
-    image: ${PASSBOLT_IMAGE:-passbolt/passbolt:5.7.0-1-ce}
+    image: ${PASSBOLT_IMAGE:-passbolt/passbolt:5.7.2-1-ce}
     container_name: ${COMPOSE_PROJECT_NAME:-galera}_passbolt
     restart: unless-stopped
     depends_on:
@@ -148,6 +148,14 @@ services:
       - /bin/bash
       - -ceu
       - |
+        chown -Rf root:www-data /etc/passbolt/jwt/
+        chmod 770 /etc/passbolt/jwt/
+        if [ ! -f /etc/passbolt/jwt/jwt.key ] || [ ! -f /etc/passbolt/jwt/jwt.pem ]; then
+          su -s /bin/bash -c "/usr/share/php/passbolt/bin/cake passbolt create_jwt_keys" www-data
+        fi
+        chmod 750 /etc/passbolt/jwt/
+        [ -f /etc/passbolt/jwt/jwt.key ] && chmod 640 /etc/passbolt/jwt/jwt.key || true
+        [ -f /etc/passbolt/jwt/jwt.pem ] && chmod 640 /etc/passbolt/jwt/jwt.pem || true
         /docker-entrypoint.sh
     networks:
       galera_net:
