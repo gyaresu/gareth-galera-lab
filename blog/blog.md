@@ -2,32 +2,50 @@
 
 ![Three-node Galera cluster with passbolt](galera_passbolt.jpeg)
 
-I've been `computering` a long time but I was new to Galera so I build a demo cluster. It made me so happy that I wrote this blog post.
+### Introduction
+This demonstration lab explores the idea of when MariaDB Galera Cluster should be the preferred database solution for a self-hosted passbolt server and why [mTLS](https://en.wikipedia.org/wiki/Mutual_authentication#mTLS) is the 'glue' that makes your databases far more secure, scalable, and manageable, enabling clusters that work across subnets, data centres, and WAN links without complex firewall rules.
 
-The code for this lab is available on github.
+The lab uses Docker for convenience but the configuration and details explored are directly transferable to bare metal and virtual servers hosted in separate physical locations. Spinning up three test VMs and replicating the cluster should require few changes.
 
-> Everything in this repo is for experimental use only.
->
-> 5 minutes after it's published it will change in arbitrary and unpredictable ways.
->
-> When your program breaks, you get to keep both pieces.
+For a complete walkthrough of setting up a highly available passbolt environment with Galera, Louis wrote a great blog post on [How to Set-Up a Highly-Available Passbolt Environment](https://www.passbolt.com/blog/how-to-set-up-a-highly-available-passbolt-environment) that is definitely worth reading.
+
+The code for this lab is available on GitHub and any suggested changes would be gratefully received.
+> **Link** below.
 
 ![link](link.gif) 
-**Link**: [https://github.com/gyaresu/gareth-galera-lab](https://github.com/gyaresu/gareth-galera-lab)
 
-I created this demonstration lab to share why I think MariaDB Galera Cluster should be your preferred database solution with passbolt when you're hosting more than the family password server.
+##### [https://github.com/gyaresu/gareth-galera-lab](https://github.com/gyaresu/gareth-galera-lab)
 
-If you're looking for a complete walkthrough of setting up a highly available passbolt environment with Galera, my colleague Louis has you covered in his blog post on [How to Set-Up a Highly-Available Passbolt Environment](https://www.passbolt.com/blog/how-to-set-up-a-highly-available-passbolt-environment).
 
-This post goes deeper into configuring Galera clusters with mutual TLS (mTLS) authentication, including a complete lab you can run locally. The mTLS configuration makes for secure, scaleable, and manageable, clusters that work across subnets, data centers, and WAN links without complex firewall rules.
+### What is Galera Cluster?
 
-This lab uses docker but it directly translates to hosting your databases on separate host machines in separate physical locations. Geographically distributed is actually how I would recommend you plan your cluster.
+> MariaDB Galera Cluster is a virtually synchronous multi-primary cluster for MariaDB. It is available on Linux only and only supports the InnoDB storage engine (although there is experimental support for MyISAM and, from MariaDB 10.6, Aria. See the wsrep_replicate_myisam system variable, or, from MariaDB 10.6, the wsrep_mode system variable.
+>
+> **Features**
+> - Virtually synchronous replication
+> - Active-active multi-primary topology
+> - Read and write to any cluster node
+> - Automatic membership control: failed nodes drop from the cluster
+> - Automatic node joining
+> - True parallel replication, on row level
+> - Direct client connections, native MariaDB look & feel
+>
+> **Benefits**
+> The above features yield several benefits for a DBMS clustering solution, including:
+> - No replica lag
+> - No lost transactions
+> - Read scalability
+> - Smaller client latencies
+>
+> — [MariaDB Galera Cluster Guide](https://mariadb.com/docs/galera-cluster/readme/mariadb-galera-cluster-guide)
 
-Being in Australia, we're very aware of the 250ms round trip to servers hosted in the US/EU, so you'll need to consider the speed of light in your hosting plan. One of the great benefits of Galera is multi-master writes: ["Typically, a node executes a transaction fully and replicates the complete write-set to other nodes at COMMIT time."](https://mariadb.com/docs/galera-cluster/galera-management/performance-tuning/using-streaming-replication-for-large-transactions#large-data-transactions) This means writes execute locally (fast), and only the commit waits for replication to complete across the cluster.
+### Latency
 
-## How does a robust and and easy to manage database cluster benefit passbolt at scale?
+A round-trip for data at the speed of light from Sydney to Luxembourg is ~250ms, so any distributed system like MariaDB Galera Cluster that does real-time multi-master writes (["Typically, a node executes a transaction fully and replicates the complete write-set to other nodes at COMMIT time."](https://mariadb.com/docs/galera-cluster/galera-management/performance-tuning/using-streaming-replication-for-large-transactions#large-data-transactions)) is going to sway any decision on where the servers are hosted. Three servers in different buildings on the same campus or three data centres located in the same city could work well. Even three servers in the same rack may be the perfect choice if consistency of data and the ability to perform upgrades without downtime is the primary goal.
 
-When you're running passbolt for hundreds of users, your database becomes a critical dependency. A single database server means:
+## How does a robust and easy to manage database cluster benefit passbolt at scale?
+
+When managing passbolt for hundreds of users, the database becomes a critical dependency. A **single** database server means:
 
 - **No maintenance window flexibility**: Database updates require downtime
 - **Single point of failure**: Hardware failure takes the entire service offline
@@ -41,17 +59,17 @@ Galera's synchronous replication solves the first three problems: zero data loss
 Standard TLS encrypts traffic, but mutual TLS authenticates both sides. Instead of just the client verifying the server certificate, both sides present certificates. This means:
 
 - **Certificates authenticate peers, not IP addresses**: You can move nodes between subnets without rewriting firewall rules
-- **Network topology becomes flexible**: Nodes can be in different racks, buildings, or data centers
+- **Network topology becomes flexible**: Nodes can be in different racks, buildings, or data centres
 - **Security scales with infrastructure**: Adding a node means issuing a certificate, not managing complex firewall rules
 
 For passbolt deployments, this is especially valuable when you need to:
-- Distribute nodes across data centers for disaster recovery
+- Distribute nodes across data centres for disaster recovery
 - Perform rolling maintenance without service interruption
 - Scale the database tier without network reconfiguration
 
-Of course, this all depends on DNS working correctly. Nodes resolve each other by hostname, and certificate SANs need to match those hostnames. When something breaks, **it's always DNS™**. But at least with mTLS, you know the certificate validation will tell you if DNS is pointing to the wrong place.
+Of course, this all depends on DNS working correctly. Nodes resolve each other by hostname, and certificate SANs need to match those hostnames. When something breaks, **it's always DNS™**. But at least with mTLS, the certificate validation will show that DNS is pointing to the wrong server.
 
-## What You'll Build
+## Build
 
 This lab sets up:
 
@@ -59,8 +77,6 @@ This lab sets up:
 - Mutual TLS authentication between passbolt and the database
 - Valkey (Redis-compatible) for session storage and caching
 - Production-ready configurations that work on physical servers
-
-The Docker setup is just a convenient way to test locally. All the configurations translate directly to bare metal or virtual machines.
 
 ## Certificate Architecture
 
@@ -153,11 +169,11 @@ DATASOURCES_DEFAULT_SSL_KEY: /etc/passbolt/db-client.key
 
 ```
 galera1                          galera2
-   |                                |
+   |                               |
    |---[presents galera1.crt]----->|
    |<--[presents galera2.crt]------|
-   |                                |
-   |---[verifies with CA]---------->|
+   |                               |
+   |---[verifies with CA]--------->|
    |<--[verifies with CA]----------|
 ```
 
@@ -174,7 +190,7 @@ passbolt                         galera1
    |---[connects]------------------>|
    |<--[presents galera1.crt]-------|
    |---[verifies with CA]---------->|
-   |---[presents db-client.crt]--->|
+   |---[presents db-client.crt]---->|
    |<--[verifies with CA]-----------|
 ```
 
@@ -198,7 +214,7 @@ This setup enables secure distributed topologies. Nodes authenticate via certifi
 1. **Clone the repository and set up environment variables:**
 
    ```bash
-   git clone <repo-url>
+   git clone https://github.com/gyaresu/gareth-galera-lab
    cd gareth-galera-lab
    cp env.example .env
    # Edit .env with your passwords and passbolt admin details
@@ -213,7 +229,7 @@ This setup enables secure distributed topologies. Nodes authenticate via certifi
 2. **Generate certificates:**
 
    ```bash
-   /opt/homebrew/bin/bash ./scripts/generate-certs.sh
+   bash ./scripts/generate-certs.sh
    ```
 
    The script creates a root CA, server certificates for each Galera node, and a client certificate for passbolt.
@@ -301,13 +317,13 @@ docker compose exec passbolt \
   su -s /bin/bash -c "source /etc/environment >/dev/null 2>&1 || true; /usr/share/php/passbolt/bin/cake passbolt healthcheck" www-data
 ```
 
-The database connection check should pass (you may see warnings about self-signed certificates, which is expected in the lab).
+The database connection check should pass (there may be warnings about self-signed certificates, which is expected in the lab).
 
 ## How It Works
 
 ### Galera Replication (Node-to-Node)
 
-To secure replication traffic between nodes, we configure TLS in `galera.cnf` using `wsrep_provider_options` as described in [MariaDB's security documentation](https://mariadb.com/docs/galera-cluster/galera-security/securing-communications-in-galera-cluster):
+To secure replication traffic between nodes, configure TLS in `galera.cnf` using `wsrep_provider_options` as described in [MariaDB's security documentation](https://mariadb.com/docs/galera-cluster/galera-security/securing-communications-in-galera-cluster):
 
 ```ini
 # TLS for Galera replication traffic (port 4567)
@@ -316,7 +332,7 @@ socket.ssl_key=/etc/mysql/ssl/server-key.pem;\
 socket.ssl_ca=/etc/mysql/ssl/ca.pem"
 ```
 
-We also set the regular MariaDB TLS variables for client connections (port 3306):
+And set the regular MariaDB TLS variables for client connections (port 3306):
 
 ```ini
 # TLS for client connections (port 3306)
@@ -378,10 +394,10 @@ The lab configurations translate directly to physical servers:
 - **Firewall**: Open ports 3306 (MariaDB client connections), 4567 (Galera replication), 4444 (SST) between database nodes. Restrict access to trusted networks only.
 - **SST encryption**: The lab uses rsync for SST without encryption. For production, you can configure rsync SST to use SSH for encrypted transfers, though be aware that for very large databases (hundreds of GB or more), SST transfers can take hours even over fast networks. Alternatively, consider using `mariabackup` SST method with TLS (`encrypt=3`) if you need encrypted SST transfers.
 - **Service management**: Use systemd instead of Docker health checks. Configure proper service dependencies and restart policies.
-- **Resource allocation**: Ensure adequate RAM for each MariaDB node (Galera keeps the entire dataset in memory during replication). Plan for network bandwidth between data centers if doing WAN clustering.
+- **Resource allocation**: Ensure adequate RAM for each MariaDB node (Galera keeps the entire dataset in memory during replication). Plan for network bandwidth between data centres if doing WAN clustering.
 - **passbolt configuration sync**: If running multiple passbolt frontends, sync `/etc/passbolt/passbolt.php`, `/etc/passbolt/gpg/`, and `/etc/passbolt/jwt/` across all passbolt servers. See [Louis's HA guide](https://www.passbolt.com/blog/how-to-set-up-a-highly-available-passbolt-environment) for details.
 
-The mTLS configuration is what makes this practical for production. When nodes are in different subnets or data centers, certificates authenticate peers regardless of network location. You can deploy `galera1.example.com` in one rack, `galera2.example.com` in another, and `galera3.example.com` across a WAN link. As long as DNS resolves the hostnames and the certificates are valid, the cluster forms and replicates securely.
+The mTLS configuration is what makes this practical for production. When nodes are in different subnets or data centres, certificates authenticate peers regardless of network location. You can deploy `galera1.example.com` in one rack, `galera2.example.com` in another, and `galera3.example.com` across a WAN link. As long as DNS resolves the hostnames and the certificates are valid, the cluster forms and replicates securely.
 
 ## When to Use Galera
 
@@ -441,7 +457,7 @@ SHOW GLOBAL VARIABLES LIKE 'have_ssl';
 - Ensure certificate SANs include all hostnames used in `wsrep_cluster_address`
 - Verify certificate files have correct permissions (readable by mysql user)
 - Check certificate expiration: `openssl x509 -in certs/galera1.crt -noout -dates`
-- Regenerate certificates if SANs don't match: `/opt/homebrew/bin/bash ./scripts/generate-certs.sh`
+- Regenerate certificates if SANs don't match: `bash ./scripts/generate-certs.sh`
 
 **Node in non-primary state:**
 - Check if node can resolve other cluster members: `docker compose exec galera2 getent hosts galera1.local`
@@ -477,5 +493,5 @@ SHOW GLOBAL VARIABLES LIKE 'have_ssl';
 - [Galera Manager](https://galeracluster.com/galera-mgr/) for cluster monitoring and management (commercial)
 
 **Community forum**
-> I hope you find time to give MariaDB Galera Cluster a try and please let me know your thoughts on the passbolt community forum thread: ["passbolt with MariaDB Galera Cluster using Mutual TLS (mTLS) authentication"](https://community.passbolt.com/)
+> Now let's head over to passbolt community forum thread to continue the discussion: ["passbolt with MariaDB Galera Cluster using Mutual TLS (mTLS) authentication"](https://community.passbolt.com/)
 
